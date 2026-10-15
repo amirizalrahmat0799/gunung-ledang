@@ -5,7 +5,7 @@
 ![SDL3](https://img.shields.io/badge/SDL-3.2-informational)
 [![license](https://img.shields.io/github/license/amirizalrahmat0799/gunung-ledang)](LICENSE)
 
-**A co-op horror Metroidvania for up to four players, set on Malaysia's most haunted mountain, with
+**A co-op horror Metroidvania for up to four players, set on Malaysia's legendary mountain, with
 Source-engine-style multiplayer netcode written from scratch in C++20.**
 
 ![Four players crossing the forbidden forest while two penanggal hunt them](docs/images/coop.png)
