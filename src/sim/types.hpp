@@ -1,6 +1,6 @@
 #pragma once
 // Shared simulation types. All positions and velocities are fixed-point integers (1/256 pixel), so the
-// client's prediction and the server's simulation produce bit-identical results on any compiler or CPU.
+// simulation produces bit-identical results on any compiler or CPU.
 
 #include <cstdint>
 
@@ -16,8 +16,6 @@ constexpr fx kTileFx = kTile * kFx;  // 4096 = 1 << 12
 constexpr int kTileShift = 12;
 
 constexpr int kTickRate = 60;        // simulation steps per second
-constexpr int kSnapshotInterval = 2; // server sends a snapshot every 2 ticks (30 Hz)
-constexpr int kMaxPlayers = 4;
 
 enum Button : uint8_t {
     BtnLeft = 1 << 0,

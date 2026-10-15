@@ -1,14 +1,24 @@
 #include "client/game.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdio>
-
-#include "core/clock.hpp"
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 
 namespace ledang {
 
 namespace {
+
+constexpr double kTickSeconds = 1.0 / kTickRate;
+
+// Hit-stop: the world freezes for a few ticks when something lands, so hits feel heavy.
+constexpr int kHitstopHit = 3;
+constexpr int kHitstopKill = 6;
+constexpr int kHitstopHurt = 9;
+constexpr int kHitstopDeath = 16;
 
 SDL_Color rgb(int r, int g, int b, int a = 255) {
     return SDL_Color{static_cast<Uint8>(r), static_cast<Uint8>(g), static_cast<Uint8>(b), static_cast<Uint8>(a)};
@@ -18,18 +28,7 @@ const SDL_Color kGold = rgb(236, 196, 80);
 const SDL_Color kPale = rgb(220, 210, 200);
 const SDL_Color kBlood = rgb(210, 40, 44);
 const SDL_Color kDim = rgb(150, 140, 160);
-
-struct NetProfile {
-    const char* name;
-    LinkProfile link;  // applied in each direction
-};
-constexpr NetProfile kNetProfiles[] = {
-    {"off", {0, 0, 0, 0}},
-    {"50 ms ping, 1% loss", {25, 5, 0.01, 0}},
-    {"150 ms ping, 5% loss", {75, 10, 0.05, 0}},
-    {"250 ms ping, 10% loss", {125, 20, 0.10, 0}},
-};
-constexpr int kNetProfileCount = 4;
+const SDL_Color kDust = rgb(150, 140, 130, 200);
 
 /// Region names along the climb, shown when you enter them.
 const char* area_name(double x, double y) {
@@ -42,137 +41,129 @@ const char* area_name(double x, double y) {
     return "KAKI GUNUNG";
 }
 
-const char* area_subtitle(const char* name) {
-    const std::string n = name;
-    if (n == "PUNCAK LEDANG") return "The summit. Her shrine waits.";
-    if (n == "AIR TERJUN") return "The waterfall shaft";
-    if (n == "DATARAN BERHANTU") return "The haunted plateau";
-    if (n == "HUTAN LARANGAN") return "The forbidden forest";
-    if (n == "JURANG BULUH") return "Ravine of bamboo stakes";
+const char* area_subtitle(const std::string& name) {
+    if (name == "PUNCAK LEDANG") return "The summit. Her shrine waits.";
+    if (name == "AIR TERJUN") return "The waterfall shaft";
+    if (name == "DATARAN BERHANTU") return "The haunted plateau";
+    if (name == "HUTAN LARANGAN") return "The forbidden forest";
+    if (name == "JURANG BULUH") return "Ravine of bamboo stakes";
     return "The foot of the mountain";
+}
+
+std::string format_time(uint32_t ticks) {
+    const uint32_t s = ticks / kTickRate;
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%u:%02u:%02u", s / 3600, (s / 60) % 60, s % 60);
+    return buf;
+}
+
+std::string default_save_path() {
+    char* dir = SDL_GetPrefPath("Amirizal", "GunungLedang");
+    std::string path = dir ? std::string(dir) + "save.txt" : "save.txt";
+    SDL_free(dir);
+    return path;
 }
 
 }  // namespace
 
-// ---- ListenServer ---------------------------------------------------------------------------------------------
-
-ListenServer::~ListenServer() { stop(); }
-
-bool ListenServer::start(uint16_t port, int warp) {
-    server_ = std::make_unique<Server>();
-    if (warp >= 0) server_->debug_unlock(AbilityDash | AbilityDoubleJump | AbilityWallJump, warp);
-    if (!server_->start(port) && !server_->start(0)) return false;
-    port_ = server_->port();
-    running_ = true;
-    thread_ = std::thread([this] { run(); });
-    return true;
-}
-
-void ListenServer::stop() {
-    running_ = false;
-    if (thread_.joinable()) thread_.join();
-    server_.reset();
-}
-
-void ListenServer::set_link_profile(const LinkProfile& p) {
-    std::lock_guard lock(mutex_);
-    pending_profile_ = p;
-}
-
-void ListenServer::run() {
-    while (running_) {
-        {
-            std::lock_guard lock(mutex_);
-            if (pending_profile_) {
-                server_->set_link_profile(*pending_profile_);
-                pending_profile_.reset();
-            }
-        }
-        const double now = now_seconds();
-        server_->update(now);
-        sleep_until_seconds(now + 0.001);
-    }
-}
-
-// ---- Game -----------------------------------------------------------------------------------------------------
-
 Game::Game(SDL_Renderer* renderer, GameOptions options)
     : sdl_(renderer), opt_(std::move(options)), renderer_(renderer, Map::world()) {
-    if (opt_.host) {
-        host_game();
-    } else if (!opt_.connect.empty()) {
-        join_game(opt_.connect);
+    debug_ = opt_.debug;
+    save_path_ = opt_.save_path.empty() ? default_save_path() : opt_.save_path;
+    if (opt_.warp < 0) {
+        std::ifstream in(save_path_, std::ios::binary);
+        if (in) {
+            std::stringstream ss;
+            ss << in.rdbuf();
+            save_ = save_from_text(ss.str());
+        }
     }
+    if (opt_.start || opt_.warp >= 0) start_world(opt_.warp >= 0 ? std::nullopt : save_);
 }
 
 Game::~Game() {
-    if (client_) client_->disconnect(now_seconds());
-    for (auto& b : bots_) b->disconnect(now_seconds());
+    if (world_ && screen_ != Screen::Title) write_save();
     if (gamepad_) SDL_CloseGamepad(gamepad_);
 }
 
-void Game::host_game() {
-    listen_ = std::make_unique<ListenServer>();
-    if (!listen_->start(opt_.port, opt_.warp)) {
-        listen_.reset();
-        status_message_ = "Could not open a UDP port to host on.";
-        return;
-    }
-    join_game("127.0.0.1:" + std::to_string(listen_->port()));
-    for (int i = 0; i < opt_.bots; ++i) {
-        bots_.push_back(std::make_unique<ClientCore>());
-        bots_.back()->connect(Address{0x7F000001, listen_->port()}, now_seconds());
-        bot_brains_.emplace_back(static_cast<uint32_t>(900 + i));
-    }
-}
+// ---- Flow -----------------------------------------------------------------------------------------------------
 
-void Game::join_game(const std::string& address) {
-    const auto addr = Address::parse(address, opt_.port);
-    if (!addr) {
-        status_message_ = "Can't find " + address;
-        screen_ = Screen::Title;
-        return;
-    }
-    client_ = std::make_unique<ClientCore>();
-    client_->connect(*addr, now_seconds());
-    screen_ = Screen::Playing;
-    joined_at_ = -1;
-    victory_at_ = -1;
-    moved_ = false;
-    status_message_.clear();
-    apply_net_profile();
-}
-
-void Game::leave_game(const std::string& reason) {
-    if (client_) client_->disconnect(now_seconds());
-    client_.reset();
-    for (auto& b : bots_) b->disconnect(now_seconds());
-    bots_.clear();
-    bot_brains_.clear();
-    if (listen_) listen_->stop();
-    listen_.reset();
-    banners_.clear();
+void Game::start_world(const std::optional<SaveData>& save) {
+    world_ = std::make_unique<World>(Map::world());
+    if (save) world_->restore(*save);
+    if (opt_.warp >= 0) world_->debug_unlock(AbilityDash | AbilityDoubleJump | AbilityWallJump, opt_.warp);
+    prev_ = std::make_unique<World>(*world_);
+    accumulator_ = 0;
+    hitstop_ = 0;
     fx_ = Effects{};
-    status_message_ = reason;
+    banners_.clear();
+    last_area_.clear();
+    was_on_ground_ = true;
+    victory_at_ = world_->victory() ? now_ : -1;
+    playing_since_ = now_;
+    moved_ = false;
+    held_from_menu_ = opt_.autoplay ? 0 : 0xFF;
+    screen_ = Screen::Playing;
+    const PlayerState& p = world_->player();
+    renderer_.snap_camera(to_px(p.x) + 5, to_px(p.y) - 10);
+}
+
+void Game::leave_to_title() {
+    write_save();
+    world_.reset();
+    prev_.reset();
     screen_ = Screen::Title;
+    menu_index_ = 0;
 }
 
-void Game::apply_net_profile() {
-    LinkProfile p = kNetProfiles[opt_.net_profile].link;
-    if (listen_) {
-        listen_->set_link_profile(p);  // both directions are simulated
-    } else {
-        p.latency_ms *= 2;  // remote server: only our upstream can be slowed, so put the whole round trip there
-        p.jitter_ms *= 2;
+void Game::write_save() {
+    if (!world_ || opt_.warp >= 0) return;  // warped (development) runs never touch the real save
+    save_ = world_->save_data();
+    const std::string tmp = save_path_ + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) return;
+        out << save_to_text(*save_);
+        if (!out) return;
     }
-    if (client_) client_->set_link_profile(p);
+    // Replace the old save in one step, so a crash mid-write can't leave a broken file.
+    std::error_code ec;
+    std::filesystem::rename(tmp, save_path_, ec);
 }
 
-void Game::banner(const std::string& title, const std::string& subtitle, SDL_Color color, double now, double duration) {
-    banners_.push_back(Banner{title, subtitle, color, now, duration});
+void Game::banner(const std::string& title, const std::string& subtitle, SDL_Color color, double duration) {
+    banners_.push_back(Banner{title, subtitle, color, now_, duration});
+}
+
+// ---- Input ----------------------------------------------------------------------------------------------------
+
+std::vector<std::string> Game::menu_items() const {
+    if (screen_ == Screen::Paused) return {"RESUME", "QUIT TO TITLE"};
+    std::vector<std::string> items;
+    if (save_) items.push_back("CONTINUE");
+    items.push_back("NEW GAME");
+    items.push_back("QUIT");
+    return items;
+}
+
+void Game::menu_move(int delta) {
+    const int n = static_cast<int>(menu_items().size());
+    menu_index_ = (menu_index_ + delta + n) % n;
+}
+
+void Game::menu_select() {
+    const std::vector<std::string> items = menu_items();
+    const std::string& item = items[static_cast<size_t>(std::clamp(menu_index_, 0, static_cast<int>(items.size()) - 1))];
+    if (item == "CONTINUE") start_world(save_);
+    if (item == "NEW GAME") start_world(std::nullopt);
+    if (item == "QUIT") quit_ = true;
+    if (item == "RESUME") screen_ = Screen::Playing;
+    if (item == "QUIT TO TITLE") leave_to_title();
 }
 
 void Game::handle_event(const SDL_Event& e) {
+    enum class Nav { None, Up, Down, Select, Back, Pause };
+    Nav nav = Nav::None;
     switch (e.type) {
         case SDL_EVENT_QUIT:
             quit_ = true;
@@ -186,58 +177,56 @@ void Game::handle_event(const SDL_Event& e) {
                 gamepad_ = nullptr;
             }
             break;
-        case SDL_EVENT_TEXT_INPUT:
-            if (screen_ == Screen::JoinPrompt && address_text_.size() < 40) {
-                for (const char* c = e.text.text; *c; ++c) {
-                    if ((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || *c == '.' ||
-                        *c == ':' || *c == '-') {
-                        address_text_ += *c;
-                    }
-                }
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            switch (e.gbutton.button) {
+                case SDL_GAMEPAD_BUTTON_DPAD_UP: nav = Nav::Up; break;
+                case SDL_GAMEPAD_BUTTON_DPAD_DOWN: nav = Nav::Down; break;
+                case SDL_GAMEPAD_BUTTON_SOUTH: nav = Nav::Select; break;
+                case SDL_GAMEPAD_BUTTON_EAST: nav = Nav::Back; break;
+                case SDL_GAMEPAD_BUTTON_START: nav = Nav::Pause; break;
+                default: break;
             }
             break;
-        case SDL_EVENT_KEY_DOWN: {
-            if (e.key.repeat && e.key.key != SDLK_BACKSPACE) break;
-            const SDL_Keycode k = e.key.key;
-            if (screen_ == Screen::Title) {
-                if (k == SDLK_1 || k == SDLK_H) host_game();
-                if (k == SDLK_2 || k == SDLK_J) {
-                    screen_ = Screen::JoinPrompt;
-                    SDL_StartTextInput(SDL_GetRenderWindow(sdl_));
-                }
-                if (k == SDLK_ESCAPE || k == SDLK_Q) quit_ = true;
-            } else if (screen_ == Screen::JoinPrompt) {
-                if (k == SDLK_BACKSPACE && !address_text_.empty()) address_text_.pop_back();
-                if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
-                    SDL_StopTextInput(SDL_GetRenderWindow(sdl_));
-                    join_game(address_text_);
-                }
-                if (k == SDLK_ESCAPE) {
-                    SDL_StopTextInput(SDL_GetRenderWindow(sdl_));
-                    screen_ = Screen::Title;
-                }
-            } else {
-                if (k == SDLK_ESCAPE) leave_game("");
-                if (k == SDLK_F1) opt_.overlay = !opt_.overlay;
-                if (k == SDLK_F2) {
-                    opt_.net_profile = (opt_.net_profile + 1) % kNetProfileCount;
-                    apply_net_profile();
-                    banner("NETWORK", std::string("Simulating: ") + kNetProfiles[opt_.net_profile].name, kPale, now_seconds(), 2.5);
-                }
-                if (k == SDLK_F3 && client_) {
-                    client_->set_prediction(!client_->prediction());
-                    banner("PREDICTION", client_->prediction() ? "on: you move instantly" : "off: you wait for the server", kPale, now_seconds(), 2.5);
-                }
-                if (k == SDLK_F4 && client_) {
-                    client_->set_smoothing(!client_->smoothing());
-                    banner("SMOOTHING", client_->smoothing() ? "on" : "off: corrections snap", kPale, now_seconds(), 2.5);
-                }
-                if (k == SDLK_F5) opt_.ghosts = !opt_.ghosts;
+        case SDL_EVENT_KEY_DOWN:
+            if (e.key.repeat) break;
+            switch (e.key.key) {
+                case SDLK_UP:
+                case SDLK_W: nav = Nav::Up; break;
+                case SDLK_DOWN:
+                case SDLK_S: nav = Nav::Down; break;
+                case SDLK_RETURN:
+                case SDLK_KP_ENTER:
+                case SDLK_SPACE:
+                case SDLK_Z: nav = Nav::Select; break;
+                case SDLK_ESCAPE: nav = Nav::Pause; break;
+                case SDLK_F1: debug_ = !debug_; break;
+                default: break;
             }
             break;
-        }
         default:
             break;
+    }
+    if (nav == Nav::None) return;
+
+    if (screen_ == Screen::Playing) {
+        if (nav == Nav::Pause) {
+            if (victory_at_ >= 0 && now_ - victory_at_ > 2) {
+                leave_to_title();
+            } else {
+                screen_ = Screen::Paused;
+                menu_index_ = 0;
+            }
+        } else if (nav == Nav::Select && victory_at_ >= 0 && now_ - victory_at_ > 4) {
+            leave_to_title();
+        }
+        return;
+    }
+    if (nav == Nav::Up) menu_move(-1);
+    if (nav == Nav::Down) menu_move(1);
+    if (nav == Nav::Select) menu_select();
+    if (nav == Nav::Back || nav == Nav::Pause) {
+        if (screen_ == Screen::Paused) screen_ = Screen::Playing;
+        else if (nav == Nav::Pause) quit_ = true;
     }
 }
 
@@ -269,109 +258,184 @@ uint8_t Game::read_input() {
     return b;
 }
 
-void Game::handle_game_events(double now) {
-    const int me = client_->slot();
-    for (const Event& e : client_->take_events()) {
+/// A simple scripted player for demos and screenshots: runs uphill, jumps, and swings at nearby spirits.
+uint8_t Game::autoplay_input() {
+    const uint32_t t = ++autoplay_tick_;
+    const PlayerState& p = world_->player();
+    uint8_t b = BtnRight;
+    if (t % 50 < 18) b |= BtnJump;
+    if ((p.has(FlagWallLeft) || p.has(FlagWallRight)) && t % 12 < 6) b |= BtnJump;
+    if (t % 97 == 0) b |= BtnDash;
+    for (const EnemyState& e : world_->enemies()) {
+        if (!e.alive()) continue;
+        const fx dx = e.x - p.x, dy = e.y - p.y;
+        if (std::abs(dx) < px(28) && std::abs(dy) < px(20) && t % 14 == 0) {
+            b = static_cast<uint8_t>((b & ~(BtnLeft | BtnRight)) | (dx < 0 ? BtnLeft : BtnRight) | BtnAttack);
+        }
+        if (std::abs(dx) < px(10) && dy > px(8) && dy < px(30) && !p.has(FlagOnGround) && t % 14 == 7) {
+            b |= BtnDown | BtnAttack;  // pogo
+        }
+    }
+    return b;
+}
+
+// ---- Simulation -----------------------------------------------------------------------------------------------
+
+void Game::simulate(double dt) {
+    accumulator_ = std::min(accumulator_ + dt, 0.25);  // after a long stall, don't try to catch up for seconds
+    while (accumulator_ >= kTickSeconds) {
+        accumulator_ -= kTickSeconds;
+        *prev_ = *world_;
+        if (hitstop_ > 0) {
+            --hitstop_;
+            continue;
+        }
+        uint8_t buttons = opt_.autoplay ? autoplay_input() : read_input();
+        // Buttons still held from the menu (the Space that picked "New game") count only once released.
+        held_from_menu_ &= buttons;
+        buttons = static_cast<uint8_t>(buttons & ~held_from_menu_);
+        world_->update(buttons);
+
+        // Movement effects: dust and squash when landing, jumping and dashing.
+        const PlayerState& p = world_->player();
+        const bool on_ground = p.has(FlagOnGround);
+        const float feet_x = static_cast<float>(to_px(p.x) + 5), feet_y = static_cast<float>(to_px(p.y) + 14);
+        if (on_ground && !was_on_ground_ && last_vy_ > 600) {
+            fx_.squash = std::min(1.0f, static_cast<float>(last_vy_) / 1400.0f);
+            fx_.burst(feet_x, feet_y, 6 + static_cast<int>(last_vy_ / 250), kDust, 40, 0.4f, false, 60);
+        }
+        if (!on_ground && was_on_ground_ && p.vy < 0) {
+            fx_.squash = -0.55f;
+            fx_.burst(feet_x, feet_y, 5, kDust, 30, 0.3f, false, 40);
+        }
+        if (p.dash_ticks > last_dash_ticks_) {
+            fx_.burst(feet_x - static_cast<float>(p.facing() * 6), feet_y - 6, 10, rgb(150, 200, 255, 220), 50, 0.35f, true);
+            fx_.shake = std::max(fx_.shake, 1.0f);
+        }
+        was_on_ground_ = on_ground;
+        last_vy_ = p.vy;
+        last_dash_ticks_ = p.dash_ticks;
+
+        handle_world_events();
+    }
+}
+
+void Game::handle_world_events() {
+    for (const Event& e : world_->take_events()) {
         const float x = e.x, y = e.y;
         switch (e.type) {
-            case EventType::PlayerJoined:
-                if (e.a != me) banner("P" + std::to_string(e.a + 1) + " has joined the climb", "", player_colors()[e.a].headcloth, now, 2.5);
-                break;
-            case EventType::PlayerLeft:
-                banner("P" + std::to_string(e.a + 1) + " has left", "", kDim, now, 2.5);
-                break;
-            case EventType::AbilityGained: {
+            case EventType::AbilityGained:
                 fx_.burst(x + 8, y + 8, 50, kGold, 70, 1.6f, true, -20);
-                if (e.a == AbilityDash) banner("KERAMAT ANGIN", "The wind shrine grants DASH  (Shift / C)", kGold, now, 5);
-                if (e.a == AbilityDoubleJump) banner("KERAMAT BANGAU", "The crane shrine grants DOUBLE JUMP", kGold, now, 5);
-                if (e.a == AbilityWallJump) banner("KERAMAT HARIMAU", "The tiger shrine grants WALL JUMP", kGold, now, 5);
+                hitstop_ = std::max(hitstop_, 10);
+                if (e.a == AbilityDash) banner("KERAMAT ANGIN", "The wind shrine grants DASH  (Shift / C)", kGold, 5);
+                if (e.a == AbilityDoubleJump) banner("KERAMAT BANGAU", "The crane shrine grants DOUBLE JUMP", kGold, 5);
+                if (e.a == AbilityWallJump) banner("KERAMAT HARIMAU", "The tiger shrine grants WALL JUMP", kGold, 5);
+                write_save();
                 break;
-            }
             case EventType::LanternLit:
                 fx_.burst(x + 8, y + 4, 30, rgb(255, 170, 80), 50, 1.2f, true, -30);
-                banner("PELITA MENYALA", "A lantern is lit. The fallen return here.", rgb(255, 180, 100), now, 3);
+                banner("PELITA MENYALA", "A lantern is lit. You will return here.", rgb(255, 180, 100), 3);
+                break;
+            case EventType::Rested:
+                fx_.burst(x + 8, y + 4, 10, rgb(255, 200, 120), 25, 0.8f, true, -30);
+                write_save();
                 break;
             case EventType::PlayerHurt:
-                fx_.burst(x + 5, y + 7, 12, kBlood, 60, 0.6f, false, 200);
-                if (e.a == me) fx_.shake = 3;
+                fx_.burst(x + 5, y + 7, 14, kBlood, 70, 0.6f, false, 220);
+                fx_.shake = 4;
+                hurt_flash_ = 0.35f;
+                hitstop_ = std::max(hitstop_, kHitstopHurt);
                 break;
             case EventType::PlayerDied:
                 fx_.burst(x + 5, y + 7, 40, rgb(150, 200, 255), 40, 2.0f, true, -25);
-                if (e.a == me) {
-                    fx_.shake = 5;
-                    banner("KAU TUMPAS", "You have fallen. The lantern will call you back...", kBlood, now, 3);
-                } else {
-                    banner("P" + std::to_string(e.a + 1) + " has fallen", "", kBlood, now, 2.5);
-                }
+                fx_.shake = 6;
+                hurt_flash_ = 0.6f;
+                hitstop_ = std::max(hitstop_, kHitstopDeath);
+                banner("KAU TUMPAS", "You have fallen. The lantern will call you back...", kBlood, 3);
                 break;
             case EventType::PlayerRespawned:
+                fx_.burst(x + 5, y + 7, 20, rgb(255, 200, 120), 30, 1.0f, true, -30);
                 break;
             case EventType::EnemyHit:
-                fx_.burst(x + 6, y + 6, 10, rgb(255, 240, 200), 90, 0.35f, true);
+                fx_.burst(x + 6, y + 6, 12, rgb(255, 240, 200), 110, 0.3f, true);
+                fx_.shake = std::max(fx_.shake, 1.5f);
+                hitstop_ = std::max(hitstop_, kHitstopHit);
                 break;
             case EventType::EnemyKilled:
-                fx_.burst(x + 6, y + 6, 36, rgb(180, 160, 220), 50, 1.5f, true, -40);
-                fx_.burst(x + 6, y + 6, 14, rgb(120, 10, 20), 70, 0.8f, false, 220);
+                fx_.burst(x + 6, y + 6, 36, rgb(180, 160, 220), 55, 1.5f, true, -40);
+                fx_.burst(x + 6, y + 6, 16, rgb(120, 10, 20), 80, 0.8f, false, 240);
+                fx_.shake = std::max(fx_.shake, 3.0f);
+                hitstop_ = std::max(hitstop_, kHitstopKill);
+                break;
+            case EventType::Pogo:
+                fx_.burst(x, y + 4, 8, rgb(255, 240, 200), 60, 0.25f, true);
+                fx_.squash = -0.5f;
                 break;
             case EventType::Victory:
-                victory_at_ = now;
+                victory_at_ = now_;
                 fx_.burst(x + 5, y, 120, rgb(255, 200, 230), 80, 3.0f, true, -15);
+                write_save();
                 break;
         }
     }
 }
 
+Scene Game::build_scene(double alpha) const {
+    Scene s;
+    s.abilities = world_->abilities();
+    s.lanterns_lit = world_->lanterns_lit();
+    s.player = world_->player();
+    auto lerp = [alpha](fx a, fx b) {
+        // Teleports (respawn, stake hits) snap instead of sliding across the screen.
+        if (std::abs(b - a) > 3 * kTileFx) return static_cast<double>(b) / kFx;
+        return (static_cast<double>(a) + (static_cast<double>(b) - static_cast<double>(a)) * alpha) / kFx;
+    };
+    const PlayerState& a = prev_->player();
+    s.px = lerp(a.x, s.player.x);
+    s.py = lerp(a.y, s.player.y);
+    const auto& now = world_->enemies();
+    const auto& before = prev_->enemies();
+    for (size_t i = 0; i < now.size(); ++i) {
+        const EnemyState& e = now[i];
+        const EnemyState& b = i < before.size() ? before[i] : e;
+        s.enemies.push_back(EnemyView{e, lerp(b.x, e.x), lerp(b.y, e.y)});
+    }
+    return s;
+}
+
+// ---- Frame ----------------------------------------------------------------------------------------------------
+
 bool Game::frame(double now, double dt) {
+    now_ = now;
     if (started_ < 0) started_ = now;
-    fx_.update(static_cast<float>(dt));
+    if (dt > 0) fps_ = fps_ * 0.95 + (1.0 / dt) * 0.05;
     renderer_.begin();
 
-    if (screen_ == Screen::Title || screen_ == Screen::JoinPrompt) {
+    if (screen_ == Screen::Title || !world_) {
+        fx_.update(static_cast<float>(dt));
         const double t = now - started_;
         renderer_.snap_camera(800 + 620 * std::sin(t * 0.04), 330 + 120 * std::sin(t * 0.07));
-        renderer_.draw_world(nullptr, fx_, now, {});
-        if (screen_ == Screen::Title) {
-            draw_title(now);
-        } else {
-            draw_join_prompt(now);
+        renderer_.draw_world(nullptr, fx_, now);
+        draw_title();
+    } else {
+        if (screen_ == Screen::Playing) {
+            simulate(dt);
+            fx_.update(static_cast<float>(dt));
+            hurt_flash_ = std::max(0.0f, hurt_flash_ - static_cast<float>(dt));
         }
-    } else if (client_) {
-        // Inputs are sampled at the simulation rate.
-        bot_buttons_.resize(bots_.size(), 0);
-        while (last_think_ + 1.0 / kTickRate <= now) {
-            last_think_ = std::max(last_think_ + 1.0 / kTickRate, now - 0.1);
-            buttons_ = opt_.autoplay ? auto_brain_.think(*client_) : read_input();
-            for (size_t i = 0; i < bots_.size(); ++i) bot_buttons_[i] = bot_brains_[i].think(*bots_[i]);
+        const double alpha = hitstop_ > 0 ? 1.0 : accumulator_ / kTickSeconds;
+        const Scene scene = build_scene(alpha);
+        const PlayerState& p = scene.player;
+        renderer_.set_camera_target(scene.px + 5 + p.facing() * 24, scene.py - 10, dt);
+        const std::string area = area_name(scene.px, scene.py);
+        if (area != last_area_) {
+            last_area_ = area;
+            banner(area, area_subtitle(area), kPale, 3);
         }
-        bot_buttons_.resize(bots_.size(), 0);
-        for (size_t i = 0; i < bots_.size(); ++i) bots_[i]->update(now, bot_buttons_[i]);
-        client_->update(now, buttons_);
-
-        const ClientStatus st = client_->status();
-        if (st == ClientStatus::Denied || st == ClientStatus::TimedOut || st == ClientStatus::Disconnected) {
-            leave_game(st == ClientStatus::Denied ? "The server is full (4 players)." : "Lost connection to the server.");
-            renderer_.present();
-            return !quit_;
-        }
-        if (client_->in_game()) {
-            if (joined_at_ < 0) {
-                joined_at_ = now;
-                renderer_.snap_camera(client_->local_draw_x() + 5, client_->local_draw_y() + 7);
-            }
-            handle_game_events(now);
-            renderer_.set_camera_target(client_->local_draw_x() + 5 + client_->local_player().facing() * 24,
-                                        client_->local_draw_y() - 10, dt);
-            static std::string last_area;
-            const std::string area = area_name(client_->local_draw_x(), client_->local_draw_y());
-            if (area != last_area && now - joined_at_ > 0.5) {
-                last_area = area;
-                banner(area, area_subtitle(area.c_str()), kPale, now, 3);
-            }
-            if (victory_at_ < 0 && client_->world_record().f[field::WVictory]) victory_at_ = now;
-        }
-        renderer_.draw_world(client_.get(), fx_, now, DrawOptions{opt_.ghosts, false});
-        draw_hud(now);
-        if (opt_.overlay) draw_overlay();
+        renderer_.draw_world(&scene, fx_, now);
+        draw_hud();
+        if (screen_ == Screen::Paused) draw_pause();
+        if (debug_) draw_debug();
     }
 
     if (!opt_.screenshot.empty() && !screenshot_taken_ && now - started_ >= opt_.screenshot_seconds) {
@@ -385,67 +449,65 @@ bool Game::frame(double now, double dt) {
 
 // ---- Screens and HUD ------------------------------------------------------------------------------------------
 
-void Game::draw_title(double now) {
-    const float t = static_cast<float>(now - started_);
+void Game::draw_title() {
+    const float t = static_cast<float>(now_ - started_);
     renderer_.fill(0, 0, kViewW, kViewH, rgb(0, 0, 0, 90));
     const float fade = std::min(1.0f, t / 2.0f);
     renderer_.text_centered(34, "GUNUNG LEDANG", rgb(220, 50, 50, static_cast<int>(255 * fade)), 3);
-    renderer_.text_centered(64, "a co-op horror on the haunted mountain", rgb(200, 190, 200, static_cast<int>(220 * fade)));
+    renderer_.text_centered(64, "a horror on the haunted mountain", rgb(200, 190, 200, static_cast<int>(220 * fade)));
 
-    renderer_.text_centered(98, "[1]  HOST A GAME", kPale);
-    renderer_.text_centered(112, "[2]  JOIN A GAME", kPale);
-    renderer_.text_centered(126, "[ESC] QUIT", kDim);
-#ifdef LEDANG_VERSION
-    renderer_.text(4, kViewH - 10, LEDANG_VERSION, rgb(90, 80, 100), 1, false);
-#endif
+    const std::vector<std::string> items = menu_items();
+    menu_index_ = std::clamp(menu_index_, 0, static_cast<int>(items.size()) - 1);
+    for (size_t i = 0; i < items.size(); ++i) {
+        const bool selected = static_cast<int>(i) == menu_index_;
+        const std::string label = selected ? "> " + items[i] + " <" : items[i];
+        renderer_.text_centered(96 + static_cast<float>(i) * 14, label, selected ? kGold : kDim);
+    }
+    if (save_) {
+        const std::string info = std::to_string(std::popcount(save_->abilities)) + "/3 shrines   " +
+                                 format_time(save_->play_ticks) + "   " + std::to_string(save_->deaths) + " deaths";
+        renderer_.text_centered(144, info, rgb(150, 140, 160, 200));
+    }
 
-    if (!status_message_.empty()) renderer_.text_centered(146, status_message_, rgb(255, 120, 100));
     renderer_.text_centered(176, "The Sultan of Melaka asked for her hand.", rgb(150, 140, 160, 200));
     renderer_.text_centered(188, "She asked for seven trays of mosquito hearts.", rgb(150, 140, 160, 200));
     renderer_.text_centered(200, "Nobody who climbed after her came down.", rgb(170, 60, 60, 220));
+#ifdef LEDANG_VERSION
+    renderer_.text(4, 4, LEDANG_VERSION, rgb(90, 80, 100), 1, false);
+#endif
 }
 
-void Game::draw_join_prompt(double now) {
-    renderer_.fill(0, 0, kViewW, kViewH, rgb(0, 0, 0, 120));
-    renderer_.text_centered(60, "JOIN A GAME", kGold, 2);
-    renderer_.text_centered(92, "Server address (host or host:port)", kDim);
-    const bool caret = static_cast<int>(now * 2) % 2 == 0;
-    renderer_.fill(82, 106, 220, 16, rgb(20, 16, 30, 230));
-    renderer_.text(88, 110, address_text_ + (caret ? "_" : ""), kPale, 1, false);
-    renderer_.text_centered(134, "ENTER to connect   ESC to go back", kDim);
-}
-
-void Game::draw_hud(double now) {
-    if (!client_->in_game()) {
-        const std::string s = std::string(status_name(client_->status())) + "...";
-        renderer_.text_centered(100, s, kPale);
-        return;
+void Game::draw_pause() {
+    renderer_.fill(0, 0, kViewW, kViewH, rgb(6, 4, 12, 170));
+    renderer_.text_centered(56, "PAUSED", kPale, 2);
+    const std::vector<std::string> items = menu_items();
+    menu_index_ = std::clamp(menu_index_, 0, static_cast<int>(items.size()) - 1);
+    for (size_t i = 0; i < items.size(); ++i) {
+        const bool selected = static_cast<int>(i) == menu_index_;
+        renderer_.text_centered(92 + static_cast<float>(i) * 14, selected ? "> " + items[i] + " <" : items[i], selected ? kGold : kDim);
     }
-    const PlayerState& p = client_->local_player();
-    for (int i = 0; i < tuning::kMaxHp; ++i) renderer_.sprite(renderer_.sprites().heart(i < p.hp), 6.0f + static_cast<float>(i) * 9, 6);
-    const uint8_t abilities = static_cast<uint8_t>(client_->world_record().f[field::WAbilities]);
+    const std::string info = std::to_string(std::popcount(world_->abilities())) + "/3 shrines   " +
+                             format_time(world_->play_ticks()) + "   " + std::to_string(world_->deaths()) + " deaths";
+    renderer_.text_centered(136, info, kDim);
+    renderer_.text_centered(186, "Progress is saved at every lantern and shrine.", rgb(120, 110, 130));
+}
+
+void Game::draw_hud() {
+    const PlayerState& p = world_->player();
+    for (int i = 0; i < tuning::kMaxHp; ++i) {
+        renderer_.sprite(renderer_.sprites().heart(i < p.hp), 6.0f + static_cast<float>(i) * 9, 6);
+    }
     for (int i = 0; i < 3; ++i) {
-        if (abilities & (1 << i)) renderer_.sprite(renderer_.sprites().ability_icon(i), 6.0f + static_cast<float>(i) * 11, 16);
+        if (world_->abilities() & (1 << i)) renderer_.sprite(renderer_.sprites().ability_icon(i), 6.0f + static_cast<float>(i) * 11, 16);
     }
 
-    // Party
-    float y = 6;
-    for (int s = 0; s < kMaxPlayers; ++s) {
-        const EntityRecord& r = client_->latest_snapshot().entities[static_cast<size_t>(kEntityFirstPlayer + s)];
-        if (r.type != EntityType::Player) continue;
-        const PlayerColors& pc = player_colors()[static_cast<size_t>(s)];
-        renderer_.fill(kViewW - 62, y, 6, 6, pc.headcloth);
-        std::string label = "P" + std::to_string(s + 1) + (s == client_->slot() ? " you" : "");
-        if (r.f[field::PFlags] & FlagDead) label = "P" + std::to_string(s + 1) + " ...";
-        renderer_.text(kViewW - 52, y - 1, label, s == client_->slot() ? kPale : kDim, 1);
-        y += 10;
-    }
+    if (hurt_flash_ > 0) renderer_.fill(0, 0, kViewW, kViewH, rgb(150, 0, 10, static_cast<int>(160 * std::min(1.0f, hurt_flash_ * 2))));
 
     // Banners: newest on top, fading in and out.
-    std::erase_if(banners_, [now](const Banner& b) { return now - b.start > b.duration; });
+    std::erase_if(banners_, [this](const Banner& b) { return now_ - b.start > b.duration; });
     if (!banners_.empty()) {
         const Banner& b = banners_.back();
-        const double age = now - b.start;
+        const double age = now_ - b.start;
         const double a = std::min({1.0, age * 3, (b.duration - age) * 2});
         SDL_Color c = b.color;
         c.a = static_cast<Uint8>(255 * std::clamp(a, 0.0, 1.0));
@@ -455,45 +517,32 @@ void Game::draw_hud(double now) {
         if (!b.subtitle.empty()) renderer_.text_centered(56, b.subtitle, sc);
     }
 
-    if (p.has(FlagDead)) renderer_.text_centered(150, "...", kDim);
-
-    if (!moved_ && !opt_.autoplay && !opt_.overlay && now - joined_at_ < 20) {
-        renderer_.text_centered(186, "A/D move  SPACE jump  J attack  ESC leave", rgb(200, 190, 200, 200));
-        renderer_.text_centered(198, "F1 netgraph  F2 lag  F3 prediction  F5 ghosts", rgb(150, 140, 160, 200));
+    if (!moved_ && !opt_.autoplay && now_ - playing_since_ < 25) {
+        renderer_.text_centered(174, "A/D move  SPACE jump  J strike  ESC pause", rgb(200, 190, 200, 200));
+        renderer_.text_centered(186, "W+J strike up   S+J in the air: strike down", rgb(170, 160, 180, 200));
+        renderer_.text_centered(198, "Strike down on a spirit or the stakes to bounce", rgb(150, 140, 160, 200));
     }
 
     if (victory_at_ >= 0) {
-        const float a = static_cast<float>(std::min(1.0, (now - victory_at_) / 3.0));
+        const float a = static_cast<float>(std::min(1.0, (now_ - victory_at_) / 3.0));
         renderer_.fill(0, 0, kViewW, kViewH, rgb(20, 0, 10, static_cast<int>(150 * a)));
-        renderer_.text_centered(70, "PUNCAK GUNUNG LEDANG", rgb(255, 200, 230, static_cast<int>(255 * a)), 2);
-        renderer_.text_centered(98, "You reached the Puteri's shrine.", rgb(230, 220, 230, static_cast<int>(255 * a)));
-        renderer_.text_centered(110, "She is not here. Only her flower remains,", rgb(230, 220, 230, static_cast<int>(255 * a)));
-        renderer_.text_centered(122, "and it is still warm.", rgb(230, 120, 140, static_cast<int>(255 * a)));
+        renderer_.text_centered(64, "PUNCAK GUNUNG LEDANG", rgb(255, 200, 230, static_cast<int>(255 * a)), 2);
+        renderer_.text_centered(92, "You reached the Puteri's shrine.", rgb(230, 220, 230, static_cast<int>(255 * a)));
+        renderer_.text_centered(104, "She is not here. Only her flower remains,", rgb(230, 220, 230, static_cast<int>(255 * a)));
+        renderer_.text_centered(116, "and it is still warm.", rgb(230, 120, 140, static_cast<int>(255 * a)));
+        const std::string stats = format_time(world_->play_ticks()) + "   " + std::to_string(world_->deaths()) + " deaths";
+        renderer_.text_centered(140, stats, rgb(200, 180, 200, static_cast<int>(220 * a)));
+        if (now_ - victory_at_ > 4) renderer_.text_centered(170, "ENTER to return", rgb(150, 140, 160, static_cast<int>(200 * a)));
     }
 }
 
-void Game::draw_overlay() {
-    const ConnectionStats& n = client_->net_stats();
-    const ClientStats& s = client_->stats();
-    char lines[6][96];
-    std::snprintf(lines[0], sizeof lines[0], "PING %3.0fms LOSS %4.1f%% IN %.0f OUT %.0f kbps", n.rtt_ms, n.loss * 100,
-                  n.kbps_in, n.kbps_out);
-    std::snprintf(lines[1], sizeof lines[1], "PREDICT %s SMOOTH %s FIX %llu/%llu %.1fpx",
-                  client_->prediction() ? "on " : "OFF", client_->smoothing() ? "on " : "OFF",
-                  static_cast<unsigned long long>(s.corrections), static_cast<unsigned long long>(s.predictions),
-                  s.last_error_px);
-    std::snprintf(lines[2], sizeof lines[2], "INTERP %.1ft (%.0fms) JIT %.2f STARVE %llu", s.interp_delay_ticks,
-                  s.interp_delay_ticks * 1000.0 / kTickRate, s.jitter_ticks, static_cast<unsigned long long>(s.starved_frames));
-    std::snprintf(lines[3], sizeof lines[3], "TICK %u VIEW %.1f CMD %u ACK %u", client_->server_tick(),
-                  client_->render_tick(), client_->newest_cmd(), client_->acked_cmd());
-    std::snprintf(lines[4], sizeof lines[4], "SNAP %.0fB  SIM %s",
-                  s.snapshots ? static_cast<double>(s.snapshot_bytes) / static_cast<double>(s.snapshots) : 0.0,
-                  kNetProfiles[opt_.net_profile].name);
-    std::snprintf(lines[5], sizeof lines[5], "F2 net sim  F3 predict  F4 smooth  F5 ghosts");
-    renderer_.fill(2, 150, 372, 64, rgb(0, 0, 0, 170));
-    for (int i = 0; i < 6; ++i) {
-        renderer_.text(6, 153 + static_cast<float>(i) * 10, lines[i], i == 5 ? kDim : rgb(150, 255, 170), 1, false);
-    }
+void Game::draw_debug() {
+    const PlayerState& p = world_->player();
+    char line[128];
+    std::snprintf(line, sizeof line, "%.0f fps  tick %u  pos %d,%d  vel %d,%d  hitstop %d", fps_, world_->tick(),
+                  to_px(p.x), to_px(p.y), p.vx, p.vy, hitstop_);
+    renderer_.fill(2, kViewH - 13, kViewW - 4, 11, rgb(0, 0, 0, 170));
+    renderer_.text(5, kViewH - 11, line, rgb(150, 255, 170), 1, false);
 }
 
 }  // namespace ledang

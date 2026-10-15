@@ -10,7 +10,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(LEDANG_BUILD_CLIENT "Build the SDL3 game client (downloads SDL3 if it isn't installed)" ON)
-option(LEDANG_BUILD_TESTS "Build the unit and soak tests" ON)
+option(LEDANG_BUILD_TESTS "Build the tests" ON)
 # A standalone build: SDL3 and (on Windows) the C++ runtime are linked into the executables, so the game is a
 # single .exe that runs on any PC. On by default on Windows, and used for release builds everywhere.
 if(WIN32)
@@ -33,40 +33,24 @@ function(ledang_warnings target)
   endif()
 endfunction()
 
-# ---- Engine: networking, simulation and protocol (no graphics) ----------------------------------------------
+# ---- Engine: the simulation (no graphics) ----------------------------------------------------------------------------
 add_library(ledang_core STATIC
-  src/core/bitstream.cpp
   src/core/clock.cpp
-  src/net/socket.cpp
-  src/net/link_conditioner.cpp
-  src/net/connection.cpp
   src/sim/map.cpp
   src/sim/player.cpp
   src/sim/enemy.cpp
   src/sim/world.cpp
-  src/proto/protocol.cpp
-  src/server/server.cpp
-  src/client/client_core.cpp
+  src/sim/save.cpp
 )
 target_include_directories(ledang_core PUBLIC src)
 ledang_warnings(ledang_core)
 if(WIN32)
-  target_link_libraries(ledang_core PUBLIC ws2_32 winmm)
-  target_compile_definitions(ledang_core PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX _WINSOCK_DEPRECATED_NO_WARNINGS)
+  target_link_libraries(ledang_core PUBLIC winmm)
+  target_compile_definitions(ledang_core PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
-find_package(Threads REQUIRED)
-target_link_libraries(ledang_core PUBLIC Threads::Threads)
 if(LEDANG_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   target_link_options(ledang_core PUBLIC -static-libstdc++ -static-libgcc)  # runs on older Linux too
 endif()
-
-add_executable(ledang_server src/server/main.cpp)
-target_link_libraries(ledang_server PRIVATE ledang_core)
-ledang_warnings(ledang_server)
-
-add_executable(ledang_bot src/bot/main.cpp)
-target_link_libraries(ledang_bot PRIVATE ledang_core)
-ledang_warnings(ledang_bot)
 
 # ---- Game client ---------------------------------------------------------------------------------------------
 if(LEDANG_BUILD_CLIENT)
@@ -125,15 +109,10 @@ if(LEDANG_BUILD_TESTS)
   enable_testing()
   add_executable(ledang_tests
     tests/main.cpp
-    tests/test_bitstream.cpp
-    tests/test_connection.cpp
     tests/test_sim.cpp
-    tests/test_protocol.cpp
-    tests/test_netgame.cpp
+    tests/test_save.cpp
   )
   target_link_libraries(ledang_tests PRIVATE ledang_core)
   ledang_warnings(ledang_tests)
-  add_test(NAME unit COMMAND ledang_tests --exclude soak)
-  add_test(NAME soak COMMAND ledang_tests soak)
-  set_tests_properties(soak PROPERTIES TIMEOUT 300)
+  add_test(NAME tests COMMAND ledang_tests)
 endif()

@@ -39,6 +39,7 @@ void Effects::update(float dt) {
     }
     std::erase_if(particles, [](const Particle& p) { return p.life <= 0; });
     shake = std::max(0.0f, shake - dt * 12.0f);
+    squash *= std::exp(-dt * 14.0f);  // springs back to normal in about 0.2 s
 }
 
 void Effects::burst(float x, float y, int count, SDL_Color color, float speed, float life, bool glow, float gravity) {
@@ -243,9 +244,10 @@ void Renderer::draw_tiles() {
     }
 }
 
-void Renderer::draw_objects(const ClientCore* client, double time) {
-    const uint8_t abilities = client ? static_cast<uint8_t>(client->world_record().f[field::WAbilities]) : 0;
-    const uint16_t lit = client ? static_cast<uint16_t>(client->world_record().f[field::WLanternsLit]) : 0;
+void Renderer::draw_objects(const Scene* scene, double time) {
+    (void)time;
+    const uint8_t abilities = scene ? scene->abilities : 0;
+    const uint16_t lit = scene ? scene->lanterns_lit : 0;
     int lantern = 0;
     for (const Marker& m : map_->markers()) {
         const float x = static_cast<float>(m.tx * kTile - ox_), y = static_cast<float>(m.ty * kTile - oy_);
@@ -269,7 +271,7 @@ void Renderer::draw_objects(const ClientCore* client, double time) {
                 break;
             }
             case MarkerKind::Goal:
-                sprite(sprites_->puteri_shrine(), x - 3, y - 1 + std::floor(static_cast<float>(std::sin(time) * 0.0)));
+                sprite(sprites_->puteri_shrine(), x - 3, y - 1);
                 break;
             default:
                 break;
@@ -277,25 +279,26 @@ void Renderer::draw_objects(const ClientCore* client, double time) {
     }
 }
 
-void Renderer::draw_enemy(const EntityView& v, double time, bool glow_pass) {
-    const EntityRecord& r = v.record;
-    const uint8_t flags = static_cast<uint8_t>(r.f[field::EFlags]);
-    if (!(flags & EnemyAlive)) return;
-    const auto kind = static_cast<EnemyKind>(r.f[field::EKind]);
+void Renderer::draw_enemy(const EnemyView& v, double time, bool glow_pass) {
+    const EnemyState& e = v.state;
+    if (!e.alive()) return;
     const float x = std::floor(static_cast<float>(v.x) - static_cast<float>(ox_));
     const float y = std::floor(static_cast<float>(v.y) - static_cast<float>(oy_));
-    const bool left = (flags & EnemyFacingLeft) != 0;
-    const bool hurt = r.f[field::EHurtTicks] > 0;
+    const bool left = (e.flags & EnemyFacingLeft) != 0;
+    // Struck spirits flash white for a moment.
+    const bool flash = e.hurt_ticks > enemy_tuning::kHurtTicks - 5;
+    const bool hurt = e.hurt_ticks > 0;
     const float t = static_cast<float>(time);
 
-    if (kind == EnemyKind::Penanggal) {
+    if (e.kind == EnemyKind::Penanggal) {
         if (glow_pass) {
             fill(x + 3, y + 4, 2, 2, rgb(255, 60, 40));
             fill(x + 7, y + 4, 2, 2, rgb(255, 60, 40));
+            if (flash) sprite(sprites_->penanggal_white(), x - 1, y - 1, left);
             return;
         }
         // Entrails dangle and sway behind the head.
-        const float vx = static_cast<float>(fx_px(r.f[field::EVX]));
+        const float vx = static_cast<float>(fx_px(e.vx));
         float px = x + 6, py = y + 12;
         for (int i = 0; i < 12; ++i) {
             const float nx = x + 6 + std::sin(t * 5 + static_cast<float>(i) * 0.7f) * static_cast<float>(i) * 0.3f - vx * static_cast<float>(i) * 0.9f;
@@ -313,30 +316,31 @@ void Renderer::draw_enemy(const EntityView& v, double time, bool glow_pass) {
             SDL_RenderLine(r_, sx, y + 2, sx - vx * 4 + std::sin(t * 3 + static_cast<float>(i)) * 2, y + 14 + static_cast<float>(i % 3) * 2);
         }
         SDL_Texture* tex = sprites_->penanggal();
-        if (hurt && static_cast<int>(time * 30) % 2) SDL_SetTextureColorMod(tex, 255, 90, 90);
+        if (hurt && !flash) SDL_SetTextureColorMod(tex, 255, 120, 120);
         sprite(tex, x - 1, y - 1, left);
         SDL_SetTextureColorMod(tex, 255, 255, 255);
     } else {
-        if (glow_pass) {
-            const float ex = left ? x + 3 : x + 3;
-            fill(ex, y + 3, 1, 1, rgb(255, 70, 50));
-            fill(ex + 3, y + 3, 1, 1, rgb(255, 70, 50));
-            return;
-        }
         SDL_Texture* tex = sprites_->pocong();
-        const bool airborne = !(flags & EnemyOnGround);
+        const bool airborne = !(e.flags & EnemyOnGround);
         float w = 12, h = 18;
         SDL_GetTextureSize(tex, &w, &h);
         const float stretch = airborne ? 2.0f : 0.0f;
         const SDL_FRect dst{x - 1, y - 2 - stretch, w, h + stretch};
-        if (hurt && static_cast<int>(time * 30) % 2) SDL_SetTextureColorMod(tex, 255, 90, 90);
-        SDL_RenderTextureRotated(r_, tex, nullptr, &dst, airborne ? (left ? -6.0 : 6.0) : 0.0, nullptr,
-                                 left ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE);
+        const double angle = airborne ? (left ? -6.0 : 6.0) : 0.0;
+        const SDL_FlipMode flip = left ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
+        if (glow_pass) {
+            fill(x + 3, y + 3 - stretch, 1, 1, rgb(255, 70, 50));
+            fill(x + 6, y + 3 - stretch, 1, 1, rgb(255, 70, 50));
+            if (flash) SDL_RenderTextureRotated(r_, sprites_->pocong_white(), nullptr, &dst, angle, nullptr, flip);
+            return;
+        }
+        if (hurt && !flash) SDL_SetTextureColorMod(tex, 255, 120, 120);
+        SDL_RenderTextureRotated(r_, tex, nullptr, &dst, angle, nullptr, flip);
         SDL_SetTextureColorMod(tex, 255, 255, 255);
     }
 }
 
-void Renderer::draw_player(int slot, const PlayerState& p, double wx, double wy, double time, bool local) {
+void Renderer::draw_player(const PlayerState& p, double wx, double wy, float squash) {
     if (p.has(FlagDead)) return;
     const float x = std::floor(static_cast<float>(wx) - static_cast<float>(ox_));
     const float y = std::floor(static_cast<float>(wy) - static_cast<float>(oy_));
@@ -354,7 +358,7 @@ void Renderer::draw_player(int slot, const PlayerState& p, double wx, double wy,
     } else if (std::abs(p.vx) > 64) {
         f = (static_cast<int>(wx / 7) % 2) ? FrameRun1 : FrameRun2;
     }
-    SDL_Texture* tex = sprites_->player(slot, f);
+    SDL_Texture* tex = sprites_->player(0, f);
     const bool wall_flip = f == FrameWall ? p.has(FlagWallLeft) : left;
 
     if (p.dash_ticks > 0) {
@@ -365,13 +369,14 @@ void Renderer::draw_player(int slot, const PlayerState& p, double wx, double wy,
         SDL_SetTextureColorMod(tex, 255, 255, 255);
     }
     const bool blink = p.hurt_ticks > 0 && (p.hurt_ticks / 4) % 2 == 1;
-    sprite(tex, x - 1, y - 2, wall_flip, blink ? 0.35f : 1.0f);
-
-    if (!local) {
-        const PlayerColors& pc = player_colors()[static_cast<size_t>(slot)];
-        text(x - 2, y - 12, "P" + std::to_string(slot + 1), pc.headcloth, 1);
-    }
-    (void)time;
+    // Squash and stretch: wider and shorter on landing (squash > 0), taller and thinner on take-off (< 0).
+    // The sprite stays anchored at its feet.
+    const float sx = 1.0f + 0.25f * squash, sy = 1.0f - 0.25f * squash;
+    const float w = 12 * sx, h = 16 * sy;
+    const SDL_FRect dst{std::floor(x + 5 - w / 2), std::floor(y + 14 - h), std::round(w), std::round(h)};
+    SDL_SetTextureAlphaModFloat(tex, blink ? 0.35f : 1.0f);
+    SDL_RenderTextureRotated(r_, tex, nullptr, &dst, 0, nullptr, wall_flip ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE);
+    SDL_SetTextureAlphaModFloat(tex, 1.0f);
 }
 
 void Renderer::light(double wx, double wy, float radius, SDL_Color c) {
@@ -381,7 +386,7 @@ void Renderer::light(double wx, double wy, float radius, SDL_Color c) {
     SDL_RenderTexture(r_, sprites_->light(), nullptr, &dst);
 }
 
-void Renderer::draw_lights(const ClientCore* client, const Effects& effects, double time) {
+void Renderer::draw_lights(const Scene* scene, const Effects& effects, double time) {
     SDL_SetRenderTarget(r_, lightmap_);
     // Ambient darkness: slightly brighter near the top where the moon lights the sky.
     SDL_SetRenderDrawColor(r_, 50, 44, 80, 255);
@@ -389,8 +394,8 @@ void Renderer::draw_lights(const ClientCore* client, const Effects& effects, dou
     const float t = static_cast<float>(time);
     light(300 - cam_x_ * 0.03 + cam_x_, 44 - cam_y_ * 0.03 + cam_y_, 150, rgb(70, 52, 70));
 
-    const uint8_t abilities = client ? static_cast<uint8_t>(client->world_record().f[field::WAbilities]) : 0;
-    const uint16_t lit = client ? static_cast<uint16_t>(client->world_record().f[field::WLanternsLit]) : 0;
+    const uint8_t abilities = scene ? scene->abilities : 0;
+    const uint16_t lit = scene ? scene->lanterns_lit : 0;
     int lantern = 0;
     for (const Marker& m : map_->markers()) {
         const double cx = m.tx * kTile + 8.0, cy = m.ty * kTile + 6.0;
@@ -421,23 +426,14 @@ void Renderer::draw_lights(const ClientCore* client, const Effects& effects, dou
                 break;
         }
     }
-    if (client) {
-        for (int id = kEntityFirstEnemy; id < kMaxEntities; ++id) {
-            const EntityView& v = client->views()[static_cast<size_t>(id)];
-            if (!v.present || !(v.record.f[field::EFlags] & EnemyAlive)) continue;
-            if (v.record.f[field::EKind] == static_cast<int>(EnemyKind::Penanggal)) light(v.x + 6, v.y + 6, 36, rgb(170, 30, 30));
+    if (scene) {
+        for (const EnemyView& v : scene->enemies) {
+            if (v.state.alive() && v.state.kind == EnemyKind::Penanggal) light(v.x + 6, v.y + 6, 36, rgb(170, 30, 30));
         }
-        for (int s = 0; s < kMaxPlayers; ++s) {
-            const bool local = s == client->slot();
-            const EntityView& v = client->views()[static_cast<size_t>(kEntityFirstPlayer + s)];
-            if (!local && !v.present) continue;
-            const double px = local ? client->local_draw_x() : v.x;
-            const double py = local ? client->local_draw_y() : v.y;
-            const bool dead = local ? client->local_player().has(FlagDead) : (v.record.f[field::PFlags] & FlagDead);
-            const float flicker = std::sin(t * 11 + static_cast<float>(s)) * 2.5f;
-            light(px + 5, py + 4, dead ? 30.0f : 100 + flicker, dead ? rgb(90, 120, 160) : rgb(255, 220, 180));
-            if (!dead) light(px + 5, py + 4, 34, rgb(140, 110, 80));  // hot core: faces stay readable
-        }
+        const bool dead = scene->player.has(FlagDead);
+        const float flicker = std::sin(t * 11) * 2.5f;
+        light(scene->px + 5, scene->py + 4, dead ? 30.0f : 100 + flicker, dead ? rgb(90, 120, 160) : rgb(255, 220, 180));
+        if (!dead) light(scene->px + 5, scene->py + 4, 34, rgb(140, 110, 80));  // hot core: the face stays readable
     }
     for (const Particle& p : effects.particles) {
         if (p.glow && p.size > 1) light(p.x, p.y, 10 * (p.life / p.max_life), p.color);
@@ -446,7 +442,7 @@ void Renderer::draw_lights(const ClientCore* client, const Effects& effects, dou
     SDL_RenderTexture(r_, lightmap_, nullptr, nullptr);
 }
 
-void Renderer::draw_glow(const ClientCore* client, const Effects& effects, double time) {
+void Renderer::draw_glow(const Scene* scene, const Effects& effects, double time) {
     const float t = static_cast<float>(time);
     // Fireflies
     for (size_t i = 0; i + 1 < fireflies_.size(); i += 2) {
@@ -457,29 +453,41 @@ void Renderer::draw_glow(const ClientCore* client, const Effects& effects, doubl
         if (blink < 0.2f) continue;
         fill(std::floor(fxp), std::floor(fyp), 1, 1, rgb(200, 255, 120, static_cast<int>(255 * blink)));
     }
-    if (client) {
-        for (int id = kEntityFirstEnemy; id < kMaxEntities; ++id) {
-            const EntityView& v = client->views()[static_cast<size_t>(id)];
-            if (v.present) draw_enemy(v, time, true);
-        }
-        // Keris slashes shine
-        for (int s = 0; s < kMaxPlayers; ++s) {
-            const bool local = s == client->slot();
-            const EntityView& v = client->views()[static_cast<size_t>(kEntityFirstPlayer + s)];
-            if (!local && !v.present) continue;
-            const PlayerState p = local ? client->local_player() : player_from_record(v.record);
-            const double px = (local ? client->local_draw_x() : v.x) - ox_;
-            const double py = (local ? client->local_draw_y() : v.y) - oy_;
-            if (p.has(FlagDead)) {
-                // a wandering spirit while waiting to return
-                fill(static_cast<float>(px) + 4, static_cast<float>(py) + 4 + 3 * std::sin(t * 3), 3, 3, rgb(160, 200, 255, 200));
-                continue;
+    if (scene) {
+        for (const EnemyView& v : scene->enemies) draw_enemy(v, time, true);
+        const PlayerState& p = scene->player;
+        const double px = scene->px - ox_;
+        const double py = scene->py - oy_;
+        if (p.has(FlagDead)) {
+            // a wandering spirit while the lantern calls you back
+            fill(static_cast<float>(px) + 4, static_cast<float>(py) + 4 + 3 * std::sin(t * 3), 3, 3, rgb(160, 200, 255, 200));
+        } else if (p.attack_ticks >= tuning::kAttackActiveLast - 2) {
+            // The keris slash: bright, drawn over the darkness.
+            const float a = std::clamp(static_cast<float>(p.attack_ticks - tuning::kAttackActiveLast + 3) / 9.0f, 0.0f, 1.0f);
+            SDL_Texture* slash = sprites_->keris_slash();
+            SDL_SetTextureAlphaModFloat(slash, a);
+            const bool left = p.has(FlagFacingLeft);
+            SDL_FRect dst{};
+            double angle = 0;
+            SDL_FlipMode flip = SDL_FLIP_NONE;
+            switch (p.attack_dir) {
+                case AttackDir::Side:
+                    dst = {static_cast<float>(left ? px - 14 : px + 2), static_cast<float>(py - 3), 22, 20};
+                    flip = left ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
+                    break;
+                case AttackDir::Up:
+                    dst = {static_cast<float>(px - 6), static_cast<float>(py - 17), 22, 20};
+                    angle = -90;
+                    break;
+                case AttackDir::Down:
+                    dst = {static_cast<float>(px - 6), static_cast<float>(py + 10), 22, 20};
+                    angle = 90;
+                    break;
             }
-            if (p.attack_ticks >= 10) {
-                const float a = static_cast<float>(p.attack_ticks - 9) / 9.0f;
-                const bool left = p.has(FlagFacingLeft);
-                sprite(sprites_->keris_slash(), static_cast<float>(left ? px - 14 : px + 2), static_cast<float>(py - 3), left, a);
-            }
+            dst.x = std::floor(dst.x);
+            dst.y = std::floor(dst.y);
+            SDL_RenderTextureRotated(r_, slash, nullptr, &dst, angle, nullptr, flip);
+            SDL_SetTextureAlphaModFloat(slash, 1.0f);
         }
     }
     for (const Particle& p : effects.particles) {
@@ -491,7 +499,7 @@ void Renderer::draw_glow(const ClientCore* client, const Effects& effects, doubl
     }
 }
 
-void Renderer::draw_world(const ClientCore* client, const Effects& effects, double time, const DrawOptions& opt) {
+void Renderer::draw_world(const Scene* scene, const Effects& effects, double time) {
     const float sx = effects.shake > 0 ? std::sin(static_cast<float>(time) * 90) * effects.shake : 0;
     const float sy = effects.shake > 0 ? std::cos(static_cast<float>(time) * 77) * effects.shake : 0;
     ox_ = static_cast<int>(std::floor(cam_x_ + sx));
@@ -499,19 +507,11 @@ void Renderer::draw_world(const ClientCore* client, const Effects& effects, doub
 
     draw_background(time);
     draw_tiles();
-    draw_objects(client, time);
+    draw_objects(scene, time);
 
-    if (client && client->in_game()) {
-        for (int id = kEntityFirstEnemy; id < kMaxEntities; ++id) {
-            const EntityView& v = client->views()[static_cast<size_t>(id)];
-            if (v.present) draw_enemy(v, time, false);
-        }
-        for (int s = 0; s < kMaxPlayers; ++s) {
-            if (s == client->slot()) continue;
-            const EntityView& v = client->views()[static_cast<size_t>(kEntityFirstPlayer + s)];
-            if (v.present) draw_player(s, player_from_record(v.record), v.x, v.y, time, false);
-        }
-        if (!opt.hide_local) draw_player(client->slot(), client->local_player(), client->local_draw_x(), client->local_draw_y(), time, true);
+    if (scene) {
+        for (const EnemyView& v : scene->enemies) draw_enemy(v, time, false);
+        draw_player(scene->player, scene->px, scene->py, effects.squash);
         for (const Particle& p : effects.particles) {
             if (p.glow) continue;
             const float a = std::clamp(p.life / p.max_life, 0.0f, 1.0f);
@@ -519,31 +519,10 @@ void Renderer::draw_world(const ClientCore* client, const Effects& effects, doub
             c.a = static_cast<Uint8>(c.a * a);
             fill(std::floor(p.x - static_cast<float>(ox_)), std::floor(p.y - static_cast<float>(oy_)), p.size, p.size, c);
         }
-        if (opt.ghosts) {
-            // Where the newest snapshot says everything is: remote entities are drawn behind these boxes (they
-            // are interpolated, in the past); the local player is ahead of its box (predicted, in the future).
-            const Snapshot& snap = client->latest_snapshot();
-            for (int id = kEntityFirstPlayer; id < kMaxEntities; ++id) {
-                const EntityRecord& e = snap.entities[static_cast<size_t>(id)];
-                SDL_FRect rc{};
-                if (e.type == EntityType::Player) {
-                    SDL_SetRenderDrawColor(r_, 80, 255, 120, 220);
-                    rc = {static_cast<float>(fx_px(e.f[field::PX]) - ox_), static_cast<float>(fx_px(e.f[field::PY]) - oy_), 10, 14};
-                } else if (e.type == EntityType::Enemy && (e.f[field::EFlags] & EnemyAlive)) {
-                    SDL_SetRenderDrawColor(r_, 255, 220, 80, 220);
-                    const Aabb b = enemy_box_at(static_cast<EnemyKind>(e.f[field::EKind]), e.f[field::EX], e.f[field::EY]);
-                    rc = {static_cast<float>(fx_px(b.x) - ox_), static_cast<float>(fx_px(b.y) - oy_),
-                          static_cast<float>(fx_px(b.w)), static_cast<float>(fx_px(b.h))};
-                } else {
-                    continue;
-                }
-                SDL_RenderRect(r_, &rc);
-            }
-        }
     }
 
-    draw_lights(client && client->in_game() ? client : nullptr, effects, time);
-    draw_glow(client && client->in_game() ? client : nullptr, effects, time);
+    draw_lights(scene, effects, time);
+    draw_glow(scene, effects, time);
 }
 
 }  // namespace ledang

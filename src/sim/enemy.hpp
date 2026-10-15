@@ -1,5 +1,5 @@
 #pragma once
-// The mountain's spirits. Enemies run only on the server; clients see them through interpolated snapshots.
+// The mountain's spirits.
 //   Penanggal: a flying head trailing its entrails. Ignores walls and glides toward the nearest player.
 //   Pocong:    a shrouded corpse that can only hop, and does so toward anyone who comes close.
 

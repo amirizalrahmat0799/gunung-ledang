@@ -26,7 +26,7 @@ jobs:
         run: |
           $name = "gunung-ledang-${{ github.ref_name }}-windows-x64"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item build/Release/gunung_ledang.exe, build/Release/ledang_server.exe, build/Release/ledang_bot.exe $name
+          Copy-Item build/Release/gunung_ledang.exe $name
           Copy-Item packaging/README.txt, LICENSE $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
       - uses: actions/upload-artifact@v4
@@ -54,7 +54,7 @@ jobs:
         run: |
           name="gunung-ledang-${{ github.ref_name }}-linux-x64"
           mkdir "$name"
-          cp build/gunung_ledang build/ledang_server build/ledang_bot packaging/README.txt LICENSE "$name"
+          cp build/gunung_ledang packaging/README.txt LICENSE "$name"
           tar czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@v4
         with:

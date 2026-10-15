@@ -1,7 +1,6 @@
 // ledang_tests [filter] [--exclude filter]: runs every test whose name contains the filter.
 #include <cstring>
 
-#include "net/socket.hpp"
 #include "test.hpp"
 
 int main(int argc, char** argv) {
@@ -14,7 +13,6 @@ int main(int argc, char** argv) {
             include = argv[i];
         }
     }
-    ledang::init_sockets();
     int ran = 0, failed_cases = 0;
     for (const auto& c : test::registry()) {
         if (include && !std::strstr(c.name, include)) continue;
@@ -28,7 +26,6 @@ int main(int argc, char** argv) {
         ++ran;
         if (!ok) ++failed_cases;
     }
-    ledang::shutdown_sockets();
     std::printf("\n%d test(s), %d failed\n", ran, failed_cases);
     return failed_cases == 0 && ran > 0 ? 0 : 1;
 }

@@ -80,6 +80,20 @@ SDL_Texture* Sprites::make(const std::vector<std::string_view>& rows, const Pale
     return from_pixels(static_cast<int>(w), h, px);
 }
 
+/// A palette that paints every used character white: the hit-flash version of a sprite.
+static std::vector<std::pair<char, SDL_Color>> white_of(const std::vector<std::string_view>& rows) {
+    std::vector<std::pair<char, SDL_Color>> pal;
+    for (std::string_view row : rows) {
+        for (char ch : row) {
+            if (ch == '.') continue;
+            if (std::none_of(pal.begin(), pal.end(), [ch](const auto& e) { return e.first == ch; })) {
+                pal.push_back({ch, SDL_Color{255, 255, 255, 255}});
+            }
+        }
+    }
+    return pal;
+}
+
 Sprites::Sprites(SDL_Renderer* r) : r_(r) {
     const SDL_Color outline = rgb(20, 16, 24);
     const SDL_Color skin = rgb(170, 112, 74);
@@ -123,18 +137,20 @@ Sprites::Sprites(SDL_Renderer* r) : r_(r) {
     // ---- Penanggal: a flying head with wild hair; entrails are drawn live below it -------------------------
     const SDL_Color pale = rgb(196, 176, 150);
     const SDL_Color pale_dark = rgb(150, 126, 104);
-    penanggal_ = make({"...kkkkkkkk...", "..kkkkkkkkkk..", ".kkkkkkkkkkkk.", ".kkksssssskkk.", "kkksssssssskkk",
+    const std::vector<std::string_view> penanggal_rows = {"...kkkkkkkk...", "..kkkkkkkkkk..", ".kkkkkkkkkkkk.", ".kkksssssskkk.", "kkksssssssskkk",
                        "kkssrrssrrsskk", "kkssrrssrrsskk", "kksssssssssskk", ".kssSmmmmSssk.", ".kkssmwwmsskk.",
-                       ".k.kssssssk.k.", "k...kSSSSk...k", "k....oooo....k", ".k....oo....k."},
-                      {{'k', rgb(14, 10, 16)}, {'s', pale}, {'S', pale_dark}, {'r', rgb(255, 40, 30)},
+                       ".k.kssssssk.k.", "k...kSSSSk...k", "k....oooo....k", ".k....oo....k."};
+    penanggal_ = make(penanggal_rows, Palette{{'k', rgb(14, 10, 16)}, {'s', pale}, {'S', pale_dark}, {'r', rgb(255, 40, 30)},
                        {'m', rgb(70, 10, 14)}, {'w', rgb(236, 230, 210)}, {'o', rgb(150, 20, 30)}});
+    penanggal_white_ = make(penanggal_rows, white_of(penanggal_rows));
 
     // ---- Pocong: a shrouded corpse, tied at head and feet ---------------------------------------------------
-    pocong_ = make({".....ww.....", "....wggw....", ".....ww.....", "...wwwwww...", "..wwffffww..", "..wfrffrfw..",
+    const std::vector<std::string_view> pocong_rows = {".....ww.....", "....wggw....", ".....ww.....", "...wwwwww...", "..wwffffww..", "..wfrffrfw..",
                     "..wffmmffw..", "..wwffffww..", "..wwwwwwww..", ".wwwwgwwwww.", ".wwwwwwwwww.", ".wwwwwwgwww.",
-                    ".wwgwwwwwww.", ".wwwwwwwwww.", "..wwwwwwww..", "...wwggww...", "....wggw....", ".....ww....."},
-                   {{'w', rgb(214, 208, 192)}, {'g', rgb(150, 144, 130)}, {'f', rgb(120, 136, 112)},
+                    ".wwgwwwwwww.", ".wwwwwwwwww.", "..wwwwwwww..", "...wwggww...", "....wggw....", ".....ww....."};
+    pocong_ = make(pocong_rows, Palette{{'w', rgb(214, 208, 192)}, {'g', rgb(150, 144, 130)}, {'f', rgb(120, 136, 112)},
                     {'r', rgb(255, 50, 40)}, {'m', rgb(40, 30, 30)}});
+    pocong_white_ = make(pocong_rows, white_of(pocong_rows));
 
     // ---- Keris slash: a crescent arc ------------------------------------------------------------------------
     {

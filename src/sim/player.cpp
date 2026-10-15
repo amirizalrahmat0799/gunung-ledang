@@ -110,7 +110,13 @@ void step_player(PlayerState& p, uint8_t buttons, const Map& map) {
     } else if (p.jump_buffer > 0) {
         --p.jump_buffer;
     }
-    if (pressed & BtnAttack && p.attack_ticks == 0) p.attack_ticks = kAttackTicks;
+    if (pressed & BtnAttack && p.attack_ticks == 0) {
+        p.attack_ticks = kAttackTicks;
+        p.swing_landed = 0;
+        p.attack_dir = (buttons & BtnUp)                    ? AttackDir::Up
+                       : ((buttons & BtnDown) && !on_ground) ? AttackDir::Down
+                                                            : AttackDir::Side;
+    }
 
     const bool can_dash = (p.abilities & AbilityDash) && p.dash_cooldown == 0 && (on_ground || !p.air_dashed);
     if (p.dash_ticks == 0 && (pressed & BtnDash) && can_dash) {
@@ -140,10 +146,12 @@ void step_player(PlayerState& p, uint8_t buttons, const Map& map) {
         if (p.jump_buffer > 0) {
             if (p.coyote > 0) {
                 p.vy = kJumpVel;
+                p.jump_held = 1;
                 p.coyote = 0;
                 p.jump_buffer = 0;
             } else if (wall != 0 && (p.abilities & AbilityWallJump)) {
                 p.vy = kWallJumpVy;
+                p.jump_held = 1;
                 p.vx = -wall * kWallJumpVx;
                 p.flags = static_cast<uint8_t>(wall > 0 ? (p.flags | FlagFacingLeft) : (p.flags & ~FlagFacingLeft));
                 p.control_lock = kWallJumpLock;
@@ -151,11 +159,13 @@ void step_player(PlayerState& p, uint8_t buttons, const Map& map) {
                 p.jump_buffer = 0;
             } else if ((p.abilities & AbilityDoubleJump) && p.air_jumps > 0) {
                 p.vy = kDoubleJumpVel;
+                p.jump_held = 1;
                 --p.air_jumps;
                 p.jump_buffer = 0;
             }
         }
-        if (!(buttons & BtnJump) && p.vy < kJumpCutVel) p.vy = kJumpCutVel;
+        if (p.vy >= 0) p.jump_held = 0;
+        if (p.jump_held && !(buttons & BtnJump) && p.vy < kJumpCutVel) p.vy = kJumpCutVel;
 
         p.vy += kGravity;
         const bool sliding = wall != 0 && dir == wall && p.vy > 0 && (p.abilities & AbilityWallJump);
@@ -170,11 +180,36 @@ Aabb player_box(const PlayerState& p) { return Aabb{p.x, p.y, kWidth, kHeight}; 
 
 Aabb attack_box(const PlayerState& p) {
     constexpr fx reach = px(20);
+    switch (p.attack_dir) {
+        case AttackDir::Up: return Aabb{p.x - px(4), p.y - reach, kWidth + px(8), reach + px(2)};
+        case AttackDir::Down: return Aabb{p.x - px(4), p.y + kHeight - px(2), kWidth + px(8), reach};
+        case AttackDir::Side: break;
+    }
     const fx x = p.facing() > 0 ? p.x + kWidth - px(2) : p.x - reach + px(2);
     return Aabb{x, p.y - px(2), reach, kHeight + px(4)};
 }
 
-bool attack_connects_this_tick(const PlayerState& p) { return p.attack_ticks == kAttackHitTick; }
+bool attack_active(const PlayerState& p) {
+    // Downward strikes stay out longer: bouncing should be about timing the press, not frame-perfect.
+    const uint8_t last = p.attack_dir == AttackDir::Down ? kAttackActiveLast - 4 : kAttackActiveLast;
+    return p.attack_ticks >= last && p.attack_ticks <= kAttackActiveFirst;
+}
+
+void attack_landed(PlayerState& p) {
+    if (p.swing_landed) return;
+    p.swing_landed = 1;
+    if (p.attack_dir == AttackDir::Down) {
+        p.vy = kPogoVel;
+        p.jump_held = 0;  // a bounce always goes full height
+        p.air_jumps = 1;   // a bounce refreshes the double jump and the air dash, as in Hollow Knight
+        p.air_dashed = 0;
+        p.dash_ticks = 0;
+    } else if (p.attack_dir == AttackDir::Side) {
+        p.vx = -p.facing() * kRecoilVx;
+        p.control_lock = std::max<uint8_t>(p.control_lock, 4);
+        if (p.vy > 0) p.vy /= 2;  // a mid-air hit briefly catches your fall
+    }
+}
 
 bool touches_tile(const Aabb& box, const Map& map, Tile tile) {
     for (int ty = tile_of(box.y); ty <= tile_of(box.y + box.h - 1); ++ty) {

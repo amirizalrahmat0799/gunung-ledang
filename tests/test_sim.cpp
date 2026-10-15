@@ -220,45 +220,132 @@ TEST(one_way_platforms) {
     CHECK_EQ(p.y, 6 * kTileFx - tuning::kHeight);
 }
 
-TEST(world_shrines_lanterns_and_spikes) {
+namespace {
+
+std::vector<Event> run(World& w, uint8_t buttons, int ticks) {
+    std::vector<Event> all;
+    for (int t = 0; t < ticks; ++t) {
+        w.update(buttons);
+        for (const Event& e : w.take_events()) all.push_back(e);
+    }
+    return all;
+}
+
+bool has(const std::vector<Event>& events, EventType type) {
+    return std::any_of(events.begin(), events.end(), [type](const Event& e) { return e.type == type; });
+}
+
+}  // namespace
+
+TEST(world_shrines_lanterns_and_stakes) {
     const Map map = Map::parse(
         "############\n"
         "#..........#\n"
         "#P.D.L^^^^^#\n"
         "############\n");
     World w(map);
-    CHECK(w.add_player(0));
-    CHECK(!w.add_player(0));
     CHECK_EQ(w.abilities(), uint8_t{0});
-    for (int t = 0; t < 80 && w.abilities() == 0; ++t) {
-        w.apply_command(0, BtnRight, w.tick() << 8);
-        w.step();
-    }
+    auto events = run(w, BtnRight, 80);
     CHECK(w.abilities() & AbilityDash);
-    CHECK(w.players()[0].state.abilities & AbilityDash);
-    for (int t = 0; t < 120 && w.lanterns_lit() == 0; ++t) {
-        w.apply_command(0, BtnRight, w.tick() << 8);
-        w.step();
-    }
+    CHECK(w.player().abilities & AbilityDash);
+    CHECK(has(events, EventType::AbilityGained));
+    CHECK(has(events, EventType::LanternLit));
+    CHECK(has(events, EventType::Rested));
     CHECK_EQ(w.lanterns_lit(), uint16_t{1});
-    CHECK_EQ(w.players()[0].checkpoint, uint8_t{0});
+    CHECK_EQ(w.checkpoint(), uint8_t{0});
 
-    // Walk into the spikes: hurt, invulnerable for a while, eventually dead and respawned at the lantern.
-    bool hurt = false, died = false, respawned = false;
-    for (int t = 0; t < 2000 && !respawned; ++t) {
-        w.apply_command(0, BtnRight, w.tick() << 8);
-        w.step();
+    // Walk into the stakes: you're hurt and put back on safe ground, and the lantern you pass heals you again.
+    events = run(w, BtnRight, 400);
+    CHECK(has(events, EventType::PlayerHurt));
+    CHECK(!has(events, EventType::PlayerDied));
+    CHECK(w.player().x >> kTileShift <= 5);
+}
+
+TEST(death_returns_you_to_the_last_lantern) {
+    const Map map = Map::parse(
+        "##############\n"
+        "#............#\n"
+        "#P..L....^^^^#\n"
+        "##############\n");
+    World w(map);
+    auto events = run(w, BtnRight, 3000);  // the stakes take one heart per visit; the fifth visit kills
+    const auto hurts = std::count_if(events.begin(), events.end(), [](const Event& e) { return e.type == EventType::PlayerHurt; });
+    CHECK(hurts >= 4);
+    CHECK(has(events, EventType::PlayerDied));
+    CHECK(has(events, EventType::PlayerRespawned));
+    CHECK(w.deaths() >= 1u);
+}
+
+TEST(stake_hit_returns_to_safe_ground) {
+    const Map map = Map::parse(
+        "##############\n"
+        "#............#\n"
+        "#............#\n"
+        "#P...........#\n"
+        "#####^^^^#####\n"
+        "##############\n");
+    World w(map);
+    run(w, BtnRight, 40);  // walk off the edge into the pit
+    const PlayerState& p = w.player();
+    CHECK_EQ(p.hp, uint8_t{tuning::kMaxHp - 1});
+    CHECK(p.x >> kTileShift < 4);  // back on the ledge, left of the pit (and of the 1-tile margin)
+    CHECK(p.has(FlagOnGround) || p.vy >= 0);
+}
+
+TEST(downward_strike_pogos_off_stakes) {
+    // A long stake pit with no floor to stand on: bouncing on the stakes is the only way across.
+    const Map map = Map::parse(
+        "####################\n"
+        "#..................#\n"
+        "#..................#\n"
+        "#..................#\n"
+        "#..................#\n"
+        "#P.................#\n"
+        "###^^^^^^^^^^^^^^###\n"
+        "####################\n");
+    World w(map);
+    int pogos = 0;
+    bool hurt = false;
+    // Run right; in the air, keep striking downward.
+    for (int t = 0; t < 600 && (w.player().x >> kTileShift) < 17; ++t) {
+        const PlayerState& p = w.player();
+        uint8_t b = BtnRight;
+        if (t < 3) b |= BtnJump;
+        const fx feet = p.y + tuning::kHeight, stakes = 6 * kTileFx;
+        if (!p.has(FlagOnGround) && p.vy > 0 && p.attack_ticks == 0 && stakes - feet < px(30)) b |= BtnDown | BtnAttack;
+        if (!p.has(FlagOnGround) && p.vy > 0) b |= BtnDown;
+        w.update(b);
         for (const Event& e : w.take_events()) {
-            if (e.type == EventType::PlayerHurt) hurt = true;
-            if (e.type == EventType::PlayerDied) died = true;
-            if (e.type == EventType::PlayerRespawned) respawned = true;
+            if (e.type == EventType::Pogo) ++pogos;
+            if (e.type == EventType::PlayerHurt || e.type == EventType::PlayerDied) hurt = true;
         }
     }
-    CHECK(hurt && died && respawned);
-    const PlayerState& p = w.players()[0].state;
-    CHECK_EQ(p.hp, tuning::kMaxHp);
-    CHECK(!p.has(FlagDead));
-    CHECK_EQ(p.x >> kTileShift, 5);  // back at the lantern
+    std::printf("  crossed with %d bounces\n", pogos);
+    CHECK(pogos >= 3);
+    CHECK(!hurt);
+    CHECK((w.player().x >> kTileShift) >= 17);
+}
+
+TEST(strikes_hit_in_three_directions) {
+    // A penanggal hovering right above the player: only an upward strike reaches it.
+    const Map map = Map::parse(
+        "##########\n"
+        "#........#\n"
+        "#........#\n"
+        "#........#\n"
+        "#...h....#\n"
+        "#...P....#\n"
+        "##########\n");
+    auto first_hit = [&](uint8_t held) {
+        World w(map);
+        w.set_spirits_active(false);
+        run(w, 0, 2);
+        const auto ev = run(w, static_cast<uint8_t>(held | BtnAttack), 1);
+        const auto later = run(w, held, 20);
+        return has(ev, EventType::EnemyHit) || has(later, EventType::EnemyHit);
+    };
+    CHECK(first_hit(BtnUp));
+    CHECK(!first_hit(0));
 }
 
 TEST(world_enemies_hunt_and_can_be_cut_down) {
@@ -270,83 +357,35 @@ TEST(world_enemies_hunt_and_can_be_cut_down) {
         "#P.....p...........#\n"
         "####################\n");
     World w(map);
-    w.add_player(0);
     CHECK_EQ(w.enemies().size(), size_t{1});
     const fx start_x = w.enemies()[0].x;
-    // Stand still: the pocong hops over to us.
-    for (int t = 0; t < 600; ++t) {
-        w.apply_command(0, 0, w.tick() << 8);
-        w.step();
-    }
+    run(w, 0, 600);  // stand still: the pocong hops over
     CHECK(w.enemies()[0].x < start_x);
-    // Keep swinging toward it until it dies (re-pressing attack every 20 ticks).
     bool killed = false;
     for (int t = 0; t < 1200 && !killed; ++t) {
-        const bool face_left = w.enemies()[0].x < w.players()[0].state.x;
+        const bool face_left = w.enemies()[0].x < w.player().x;
         uint8_t b = (t % 20 == 0) ? BtnAttack : 0;
         if (t % 20 == 10) b |= face_left ? BtnLeft : BtnRight;
-        w.apply_command(0, b, w.tick() << 8);
-        w.step();
-        for (const Event& e : w.take_events()) killed = killed || e.type == EventType::EnemyKilled;
+        w.update(b);
+        killed = has(w.take_events(), EventType::EnemyKilled) || killed;
     }
     CHECK(killed);
     CHECK(!w.enemies()[0].alive());
 }
 
-TEST(lag_compensation_hits_what_the_player_saw) {
-    // A penanggal swoops in from the right, bites the player and recoils. At every moment we ask: if the
-    // player swings now, is there a recent tick at which the head was inside the blade even though it isn't
-    // any more? A client rendering that tick (it was lagging behind) must get the hit; one rendering the
-    // present must not.
-    const Map map = Map::parse(
-        "##############################\n"
-        "#............................#\n"
-        "#............................#\n"
-        "#............h...............#\n"
-        "#....P.......................#\n"
-        "##############################\n");
-    World w(map);
-    w.add_player(0);
-    int rewound_cases = 0;
-    for (int t = 0; t < 400; ++t) {
-        World c = w;
-        c.apply_command(0, BtnAttack, c.tick() << 8);
-        c.step();
-        for (int k = 0; k < 2; ++k) {
-            c.apply_command(0, 0, c.tick() << 8);
-            c.step();
-        }
-        PlayerState next = c.players()[0].state;
-        step_player(next, 0, map);
-        if (!attack_connects_this_tick(next) || !c.enemies()[0].alive() || c.enemies()[0].hurt_ticks > 0) {
-            w.apply_command(0, 0, w.tick() << 8);
-            w.step();
-            continue;
-        }
-        const Aabb blade = attack_box(next);
-        const bool hit_now = blade.overlaps(enemy_box(c.enemies()[0]));
-        for (uint32_t back = 4; back <= static_cast<uint32_t>(kMaxRewindTicks) && !hit_now; back += 2) {
-            const uint32_t past = c.tick() - back;
-            if (!blade.overlaps(c.enemy_box_in_past(0, past << 8))) continue;
-            World lagged = c, present = c;
-            lagged.apply_command(0, 0, past << 8);
-            present.apply_command(0, 0, present.tick() << 8);
-            CHECK(lagged.enemies()[0].hp < c.enemies()[0].hp);
-            CHECK_EQ(present.enemies()[0].hp, c.enemies()[0].hp);
-            CHECK_EQ(lagged.rewound_hits(), c.rewound_hits() + 1);
-            ++rewound_cases;
-            break;
-        }
-        // Beyond the rewind window nothing counts, whatever the client claims.
-        World cheater = c;
-        cheater.apply_command(0, 0, 0);
-        if (!hit_now && cheater.tick() > 40) {
-            const Aabb oldest = c.enemy_box_in_past(0, (c.tick() - kMaxRewindTicks) << 8);
-            if (!blade.overlaps(oldest)) CHECK_EQ(cheater.enemies()[0].hp, c.enemies()[0].hp);
-        }
-        w.apply_command(0, 0, w.tick() << 8);
-        w.step();
+TEST(whole_world_is_deterministic) {
+    // Two worlds fed the same random inputs stay identical, spirits included: the basis for replays (and for
+    // bringing co-op back one day).
+    std::mt19937 rng(2026);
+    World a(Map::world()), b(Map::world());
+    a.debug_unlock(AbilityDash | AbilityDoubleJump | AbilityWallJump, 3);
+    b.debug_unlock(AbilityDash | AbilityDoubleJump | AbilityWallJump, 3);
+    bool same = true;
+    for (int t = 0; t < 6000 && same; ++t) {
+        const auto buttons = static_cast<uint8_t>(rng() & 0x7F);
+        a.update(buttons);
+        b.update(buttons);
+        same = a.player() == b.player() && a.enemies() == b.enemies() && a.take_events() == b.take_events();
     }
-    std::printf("  %d moments where only the rewound world registers the hit\n", rewound_cases);
-    CHECK(rewound_cases > 0);
+    CHECK(same);
 }

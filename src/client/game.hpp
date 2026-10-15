@@ -1,54 +1,28 @@
 #pragma once
-// The game client: title screen, hosting (a server on a background thread) or joining, input, events and HUD.
+// The game: title menu, the 60 Hz simulation loop with hit-stop, effects driven by world events, saving and
+// loading, the pause menu and the HUD.
 
 #include <SDL3/SDL.h>
 
-#include <atomic>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include "bot/bot_brain.hpp"
-#include "client/client_core.hpp"
 #include "client/render.hpp"
-#include "server/server.hpp"
+#include "sim/save.hpp"
+#include "sim/world.hpp"
 
 namespace ledang {
 
 struct GameOptions {
-    bool host = false;
-    std::string connect;       // join this address at startup
-    uint16_t port = kDefaultPort;
-    int bots = 0;              // headless co-op partners that join a hosted game
-    int warp = -1;             // development: start at this lantern with every ability
-    bool autoplay = false;     // the local player is driven by a bot (demos, screenshots)
-    bool overlay = false;
-    bool ghosts = false;
-    int net_profile = 0;
-    std::string screenshot;    // save the canvas here after `screenshot_seconds` and quit
+    int warp = -1;            // development: start at this lantern with every ability (no saving)
+    bool autoplay = false;    // a scripted player (demos, screenshots)
+    bool start = false;       // skip the title screen
+    bool debug = false;       // F1 overlay on from the start
+    std::string save_path;    // default: the per-user data folder SDL picks for the game
+    std::string screenshot;   // save the canvas here after `screenshot_seconds` and quit
     double screenshot_seconds = 3;
-};
-
-/// A server running on its own thread inside the game, for "Host a game".
-class ListenServer {
-public:
-    ~ListenServer();
-    bool start(uint16_t port, int warp);
-    void stop();
-    void set_link_profile(const LinkProfile& p);
-    uint16_t port() const { return port_; }
-
-private:
-    void run();
-    std::unique_ptr<Server> server_;
-    std::thread thread_;
-    std::atomic<bool> running_{false};
-    std::mutex mutex_;
-    std::optional<LinkProfile> pending_profile_;
-    uint16_t port_ = 0;
 };
 
 class Game {
@@ -61,49 +35,61 @@ public:
     bool frame(double now, double dt);
 
 private:
-    enum class Screen { Title, JoinPrompt, Playing };
+    enum class Screen { Title, Playing, Paused };
     struct Banner {
         std::string title, subtitle;
         SDL_Color color;
         double start, duration;
     };
 
-    void host_game();
-    void join_game(const std::string& address);
-    void leave_game(const std::string& reason);
+    void start_world(const std::optional<SaveData>& save);
+    void leave_to_title();
+    void write_save();
+    void simulate(double dt);
+    void handle_world_events();
+    Scene build_scene(double alpha) const;
     uint8_t read_input();
-    void apply_net_profile();
-    void handle_game_events(double now);
-    void banner(const std::string& title, const std::string& subtitle, SDL_Color color, double now, double duration = 4);
+    uint8_t autoplay_input();
+    void menu_move(int delta);
+    void menu_select();
+    std::vector<std::string> menu_items() const;
+    void banner(const std::string& title, const std::string& subtitle, SDL_Color color, double duration = 4);
 
-    void draw_title(double now);
-    void draw_join_prompt(double now);
-    void draw_hud(double now);
-    void draw_overlay();
+    void draw_title();
+    void draw_hud();
+    void draw_pause();
+    void draw_debug();
 
     SDL_Renderer* sdl_;
     GameOptions opt_;
     Renderer renderer_;
     Effects fx_;
     Screen screen_ = Screen::Title;
-    std::unique_ptr<ClientCore> client_;
-    std::unique_ptr<ListenServer> listen_;
-    std::vector<std::unique_ptr<ClientCore>> bots_;
-    std::vector<BotBrain> bot_brains_;
-    std::vector<uint8_t> bot_buttons_;
-    BotBrain auto_brain_{4242};
-    std::string address_text_ = "127.0.0.1";
-    std::string status_message_;
+    std::unique_ptr<World> world_;
+    std::unique_ptr<World> prev_;  // the world one tick ago, for smooth drawing between ticks
+    std::optional<SaveData> save_;
+    std::string save_path_;
+    double accumulator_ = 0;
+    int hitstop_ = 0;              // ticks the world stays frozen after a hit
+    float hurt_flash_ = 0;         // red screen tint after taking damage
+    bool was_on_ground_ = true;
+    fx last_vy_ = 0;
+    uint8_t last_dash_ticks_ = 0;
+    uint8_t held_from_menu_ = 0;
+    int menu_index_ = 0;
+    std::string last_area_;
     std::vector<Banner> banners_;
     SDL_Gamepad* gamepad_ = nullptr;
+    double now_ = 0;
     double started_ = -1;
-    double joined_at_ = -1;
+    double playing_since_ = -1;
     double victory_at_ = -1;
-    double last_think_ = 0;
-    uint8_t buttons_ = 0;
     bool moved_ = false;
     bool quit_ = false;
     bool screenshot_taken_ = false;
+    bool debug_ = false;
+    double fps_ = 60;
+    uint32_t autoplay_tick_ = 0;
 };
 
 }  // namespace ledang

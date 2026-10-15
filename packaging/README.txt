@@ -1,33 +1,28 @@
 GUNUNG LEDANG
-A co-op horror Metroidvania for 1 to 4 players.
+A horror Metroidvania on Malaysia's haunted mountain.
 https://github.com/amirizalrahmat0799/gunung-ledang
 
 PLAY
-  Run gunung_ledang (gunung_ledang.exe on Windows).
-  Press 1 to host a game, or 2 to join one by typing the host's IP address.
-  The host may be asked to allow the game through the firewall: allow it
-  (it uses UDP port 27015). Friends over the internet need that port forwarded
-  to the host's PC.
+  Run gunung_ledang (gunung_ledang.exe on Windows). No install needed.
 
   Windows may show "Windows protected your PC" because the game isn't signed.
   Click "More info", then "Run anyway".
 
-CONTROLS            Keyboard               Gamepad
-  Move              A / D or arrows        Left stick, d-pad
-  Jump              Space, Z or K          A
-  Attack (keris)    J or X                 X
-  Dash              Shift, C or L          B or RB
-  Drop through      S or Down              Down
-  Leave the game    Esc
+  Your progress is saved at every lantern and shrine, and when you quit.
 
-NETCODE DEMO
-  F1  network overlay       F2  simulate lag and packet loss
-  F3  prediction on/off     F4  smoothing on/off      F5  ghost boxes
+CONTROLS              Keyboard               Gamepad
+  Move                A / D or arrows        Left stick, d-pad
+  Jump                Space, Z or K          A
+  Strike (keris)      J or X                 X
+  Strike up           hold W or Up + strike
+  Strike down         in the air, hold S or Down + strike
+  Dash                Shift, C or L          B or RB
+  Drop through        S or Down              Down
+  Pause               Esc                    Start
 
-ALSO INCLUDED
-  ledang_server   dedicated server:  ledang_server --port 27015
-  ledang_bot      test players:      ledang_bot --connect <host> --bots 3
-
-  Fill your own game with bots:      gunung_ledang --host --bots 3
+TIPS
+  Strike down onto a spirit or the bamboo stakes to bounce off them.
+  A bounce gives you back your double jump and air dash.
+  Touch a lantern to light it: it heals you and you return there if you fall.
 
 Apache License 2.0. Copyright (c) Ahmad Amirizal Rahmat.

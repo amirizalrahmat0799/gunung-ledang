@@ -9,9 +9,10 @@
 #include <string>
 #include <vector>
 
-#include "client/client_core.hpp"
 #include "client/sprites.hpp"
+#include "sim/enemy.hpp"
 #include "sim/map.hpp"
+#include "sim/player.hpp"
 
 namespace ledang {
 
@@ -31,13 +32,24 @@ struct Particle {
 struct Effects {
     std::vector<Particle> particles;
     float shake = 0;
+    float squash = 0;  // player squash (+) / stretch (-), springs back to 0
     void update(float dt);
     void burst(float x, float y, int count, SDL_Color color, float speed, float life, bool glow, float gravity = 0);
 };
 
-struct DrawOptions {
-    bool ghosts = false;     // show server positions next to the predicted/interpolated ones
-    bool hide_local = false; // title screen: no players
+/// One spirit as it should be drawn this frame (position interpolated between simulation ticks).
+struct EnemyView {
+    EnemyState state;
+    double x, y;  // pixels
+};
+
+/// Everything the renderer needs from the game world for one frame.
+struct Scene {
+    uint8_t abilities = 0;
+    uint16_t lanterns_lit = 0;
+    PlayerState player;
+    double px = 0, py = 0;  // player position in pixels, interpolated
+    std::vector<EnemyView> enemies;
 };
 
 class Renderer {
@@ -58,8 +70,8 @@ public:
     double camera_x() const { return cam_x_; }
     double camera_y() const { return cam_y_; }
 
-    /// The whole world as seen by `client` (or the bare mountain if client is null).
-    void draw_world(const ClientCore* client, const Effects& effects, double time, const DrawOptions& opt);
+    /// The world (or, with no scene, just the empty mountain for the title screen).
+    void draw_world(const Scene* scene, const Effects& effects, double time);
 
     // Text and simple UI (positions in canvas pixels).
     void text(float x, float y, const std::string& s, SDL_Color c, float scale = 1, bool shadow = true);
@@ -73,11 +85,11 @@ public:
 private:
     void draw_background(double time);
     void draw_tiles();
-    void draw_objects(const ClientCore* client, double time);
-    void draw_enemy(const EntityView& v, double time, bool lit_pass);
-    void draw_player(int slot, const PlayerState& p, double x, double y, double time, bool local);
-    void draw_lights(const ClientCore* client, const Effects& effects, double time);
-    void draw_glow(const ClientCore* client, const Effects& effects, double time);
+    void draw_objects(const Scene* scene, double time);
+    void draw_enemy(const EnemyView& v, double time, bool glow_pass);
+    void draw_player(const PlayerState& p, double x, double y, float squash);
+    void draw_lights(const Scene* scene, const Effects& effects, double time);
+    void draw_glow(const Scene* scene, const Effects& effects, double time);
     void light(double wx, double wy, float radius, SDL_Color c);
 
     SDL_Renderer* r_;

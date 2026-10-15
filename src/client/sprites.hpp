@@ -30,6 +30,8 @@ public:
     SDL_Texture* player(int slot, PlayerFrame f) const { return players_[static_cast<size_t>(slot)][f]; }
     SDL_Texture* penanggal() const { return penanggal_; }
     SDL_Texture* pocong() const { return pocong_; }
+    SDL_Texture* penanggal_white() const { return penanggal_white_; }
+    SDL_Texture* pocong_white() const { return pocong_white_; }
     SDL_Texture* keris_slash() const { return slash_; }
     SDL_Texture* rock(int variant) const { return rock_[static_cast<size_t>(variant) % rock_.size()]; }
     SDL_Texture* rock_top(int variant) const { return rock_top_[static_cast<size_t>(variant) % rock_top_.size()]; }
@@ -52,6 +54,8 @@ private:
     std::array<std::array<SDL_Texture*, FrameCount>, 4> players_{};
     SDL_Texture* penanggal_ = nullptr;
     SDL_Texture* pocong_ = nullptr;
+    SDL_Texture* penanggal_white_ = nullptr;
+    SDL_Texture* pocong_white_ = nullptr;
     SDL_Texture* slash_ = nullptr;
     std::array<SDL_Texture*, 4> rock_{};
     std::array<SDL_Texture*, 4> rock_top_{};
