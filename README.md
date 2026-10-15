@@ -43,12 +43,19 @@ is where the server last said you were: you are drawn *ahead* of it, because you
 server hasn't seen yet. The orange boxes are where the server last said the spirits were: they are drawn
 *behind* them, because the client interpolates between snapshots it has already received.
 
+## Download
+
+Grab the newest build from [Releases](https://github.com/amirizalrahmat0799/gunung-ledang/releases): a zip for
+Windows (a single `gunung_ledang.exe`, nothing to install) and a tarball for Linux. Windows may say "Windows
+protected your PC" because the game isn't code-signed: click **More info**, then **Run anyway**.
+
 ## Build and run
 
 ### Windows, Visual Studio 2022
 
 Open the folder in Visual Studio (**File > Open > Folder**), pick the `x64 Release` preset, and press **F5**.
-SDL3 is downloaded and built automatically the first time; `gunung_ledang` is the startup project.
+SDL3 is downloaded and built automatically the first time and linked into the exe, along with the C++ runtime,
+so `gunung_ledang.exe` runs on its own on any Windows PC. `gunung_ledang` is the startup project.
 
 Or from a Developer Command Prompt:
 
@@ -134,6 +141,19 @@ draw others at (newest tick - ~7 ticks),
 | Interpolation delay | 4 ticks + 2.5 x measured jitter (+2 ticks when losing packets), changed by at most 2 ticks per second |
 | Lag compensation | 128 ticks of history, clamped to 30 ticks (500 ms) back |
 | Packets | 1200 bytes max. Handshake with salts; connect requests are padded so the server never amplifies |
+
+### Releasing
+
+Push a version tag and GitHub Actions builds Windows and Linux packages, runs every test, and publishes them as a
+GitHub Release with checksums ([release.yml](.github/workflows/release.yml)):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Tags with a dash (`v0.2.0-beta`) are published as pre-releases. The tag becomes the version on the title screen
+and in the exe's file properties.
 
 ## Tests
 

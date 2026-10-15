@@ -1,0 +1,81 @@
+# Builds the game and publishes a GitHub Release when a version tag is pushed:
+#   git tag v0.1.0 && git push origin v0.1.0
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DLEDANG_STATIC=ON -DLEDANG_VERSION=${{ github.ref_name }}
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "gunung-ledang-${{ github.ref_name }}-windows-x64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item build/Release/gunung_ledang.exe, build/Release/ledang_server.exe, build/Release/ledang_bot.exe $name
+          Copy-Item packaging/README.txt, LICENSE $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: gunung-ledang-*.zip
+
+  linux:
+    name: Linux x64
+    runs-on: ubuntu-22.04  # older glibc, so the build runs on more distributions
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDL build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxss-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libasound2-dev libpulse-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLEDANG_STATIC=ON -DLEDANG_VERSION=${{ github.ref_name }}
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Package
+        run: |
+          name="gunung-ledang-${{ github.ref_name }}-linux-x64"
+          mkdir "$name"
+          cp build/gunung_ledang build/ledang_server build/ledang_bot packaging/README.txt LICENSE "$name"
+          tar czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: gunung-ledang-*.tar.gz
+
+  publish:
+    name: Publish release
+    needs: [windows, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Checksums
+        run: sha256sum gunung-ledang-* > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Gunung Ledang ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            gunung-ledang-*
+            SHA256SUMS.txt

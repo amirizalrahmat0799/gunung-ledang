@@ -395,6 +395,9 @@ void Game::draw_title(double now) {
     renderer_.text_centered(98, "[1]  HOST A GAME", kPale);
     renderer_.text_centered(112, "[2]  JOIN A GAME", kPale);
     renderer_.text_centered(126, "[ESC] QUIT", kDim);
+#ifdef LEDANG_VERSION
+    renderer_.text(4, kViewH - 10, LEDANG_VERSION, rgb(90, 80, 100), 1, false);
+#endif
 
     if (!status_message_.empty()) renderer_.text_centered(146, status_message_, rgb(255, 120, 100));
     renderer_.text_centered(176, "The Sultan of Melaka asked for her hand.", rgb(150, 140, 160, 200));

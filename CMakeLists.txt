@@ -11,6 +11,19 @@ endif()
 
 option(LEDANG_BUILD_CLIENT "Build the SDL3 game client (downloads SDL3 if it isn't installed)" ON)
 option(LEDANG_BUILD_TESTS "Build the unit and soak tests" ON)
+# A standalone build: SDL3 and (on Windows) the C++ runtime are linked into the executables, so the game is a
+# single .exe that runs on any PC. On by default on Windows, and used for release builds everywhere.
+if(WIN32)
+  option(LEDANG_STATIC "Link SDL3 and the C++ runtime statically" ON)
+else()
+  option(LEDANG_STATIC "Link SDL3 and the C++ runtime statically" OFF)
+endif()
+if(LEDANG_STATIC AND MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+# The version shown in the game and in the exe's properties. Release builds pass the git tag (v0.1.0).
+set(LEDANG_VERSION "${PROJECT_VERSION}" CACHE STRING "Version string compiled into the game")
 
 function(ledang_warnings target)
   if(MSVC)
@@ -43,6 +56,9 @@ if(WIN32)
 endif()
 find_package(Threads REQUIRED)
 target_link_libraries(ledang_core PUBLIC Threads::Threads)
+if(LEDANG_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_link_options(ledang_core PUBLIC -static-libstdc++ -static-libgcc)  # runs on older Linux too
+endif()
 
 add_executable(ledang_server src/server/main.cpp)
 target_link_libraries(ledang_server PRIVATE ledang_core)
@@ -54,12 +70,19 @@ ledang_warnings(ledang_bot)
 
 # ---- Game client ---------------------------------------------------------------------------------------------
 if(LEDANG_BUILD_CLIENT)
-  find_package(SDL3 CONFIG QUIET)
+  if(NOT LEDANG_STATIC)
+    find_package(SDL3 CONFIG QUIET)
+  endif()
   if(NOT SDL3_FOUND)
-    message(STATUS "SDL3 not found: downloading SDL 3.2.24")
+    message(STATUS "Downloading SDL 3.2.24")
     include(FetchContent)
-    set(SDL_SHARED ON CACHE BOOL "" FORCE)
-    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    if(LEDANG_STATIC)
+      set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+      set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    else()
+      set(SDL_SHARED ON CACHE BOOL "" FORCE)
+      set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    endif()
     set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
     set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(SDL3
@@ -76,14 +99,23 @@ if(LEDANG_BUILD_CLIENT)
     src/client/render.cpp
     src/client/sprites.cpp
   )
-  target_link_libraries(gunung_ledang PRIVATE ledang_core SDL3::SDL3)
+  if(LEDANG_STATIC)
+    target_link_libraries(gunung_ledang PRIVATE ledang_core SDL3::SDL3-static)
+  else()
+    target_link_libraries(gunung_ledang PRIVATE ledang_core SDL3::SDL3)
+  endif()
+  target_compile_definitions(gunung_ledang PRIVATE LEDANG_VERSION="${LEDANG_VERSION}")
   ledang_warnings(gunung_ledang)
   if(WIN32)
     set_target_properties(gunung_ledang PROPERTIES WIN32_EXECUTABLE TRUE)
-    # Put SDL3.dll next to the game so it runs straight from Visual Studio or the build folder.
-    add_custom_command(TARGET gunung_ledang POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:gunung_ledang> $<TARGET_FILE_DIR:gunung_ledang>
-      COMMAND_EXPAND_LISTS)
+    configure_file(packaging/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version.rc @ONLY)
+    target_sources(gunung_ledang PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
+    if(NOT LEDANG_STATIC)
+      # Put SDL3.dll next to the game so it runs straight from Visual Studio or the build folder.
+      add_custom_command(TARGET gunung_ledang POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:gunung_ledang> $<TARGET_FILE_DIR:gunung_ledang>
+        COMMAND_EXPAND_LISTS)
+    endif()
   endif()
   set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT gunung_ledang)
 endif()
