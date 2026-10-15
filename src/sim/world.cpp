@@ -212,7 +212,7 @@ void World::step() {
         targets[i] = Target{centre_x(b), centre_y(b), s.active && !s.state.has(FlagDead)};
     }
 
-    for (size_t i = 0; i < enemies_.size(); ++i) {
+    for (size_t i = 0; i < enemies_.size() && spirits_active_; ++i) {
         EnemyState& e = enemies_[i];
         if (!e.alive()) {
             if (e.timer > 0) --e.timer;

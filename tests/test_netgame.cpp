@@ -77,7 +77,8 @@ TEST(netgame_connect_and_play) {
 
     // Stop moving; prediction must settle exactly on the server's state.
     for (auto& b : g.brains) b.set_idle(true);
-    g.run(1.5);
+    g.server.set_spirits_active(false);
+    g.run(3.0);
     for (auto& c : g.clients) {
         CHECK(c->acked_cmd() <= c->newest_cmd());
         const PlayerState server_state = c->server_player();
@@ -133,10 +134,12 @@ TEST(soak_three_bots_on_a_bad_network) {
     // With 8x command redundancy, 5% loss almost never loses an input.
     CHECK(s.cmd_gaps * 1000 < s.cmds_run);
 
+    // Stand still with the spirits frozen: once any knockback has played out and the dead have respawned
+    // (2.5 s), every player's prediction must sit exactly on the server's state.
     for (auto& b : g.brains) b.set_idle(true);
-    g.run(2.0, false);
-    // Standing still, prediction must have converged on exactly the server's position. (Spirits keep
-    // hunting idle players, so anyone hit in the last second is skipped: their knockback is still in flight.)
+    g.server.set_spirits_active(false);
+    g.run(4.0, false);
+    // (Someone resting on the bamboo stakes keeps getting hurt; their knockback is always in flight, so skip them.)
     int settled = 0;
     for (auto& c : g.clients) {
         const PlayerState server_state = c->server_player();

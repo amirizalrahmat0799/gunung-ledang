@@ -78,6 +78,8 @@ public:
     /// Development shortcut (ledang_server --warp, gunung_ledang --warp): grants abilities and lights a
     /// lantern so new players start there.
     void debug_unlock(uint8_t abilities, int lantern);
+    /// Tests: freezes every spirit in place (no movement, no bites), so players can stand still undisturbed.
+    void set_spirits_active(bool active) { spirits_active_ = active; }
 
     const std::array<PlayerSlot, kMaxPlayers>& players() const { return players_; }
     const std::vector<EnemyState>& enemies() const { return enemies_; }
@@ -122,6 +124,7 @@ private:
     uint16_t lanterns_lit_ = 0;
     uint8_t last_lit_ = kNoCheckpoint;
     bool victory_ = false;
+    bool spirits_active_ = true;
     std::vector<Event> events_;
     std::array<HistoryEntry, kHistoryTicks> history_{};
     uint64_t rewound_hits_ = 0;

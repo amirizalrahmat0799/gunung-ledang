@@ -58,6 +58,8 @@ public:
     void set_log(bool enabled) { log_ = enabled; }
     /// Development: see World::debug_unlock. Call before players join.
     void debug_unlock(uint8_t abilities, int lantern) { world_.debug_unlock(abilities, lantern); }
+    /// Tests: see World::set_spirits_active.
+    void set_spirits_active(bool active) { world_.set_spirits_active(active); }
 
     const World& world() const { return world_; }
     const ServerStats& stats() const { return stats_; }
