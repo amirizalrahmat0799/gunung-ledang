@@ -438,6 +438,12 @@ bool Game::frame(double now, double dt) {
         if (debug_) draw_debug();
     }
 
+    if (!opt_.record_dir.empty() && now - started_ >= opt_.screenshot_seconds) {
+        char path[512];
+        std::snprintf(path, sizeof path, "%s/frame_%04d.bmp", opt_.record_dir.c_str(), recorded_);
+        renderer_.save_canvas(path);
+        if (++recorded_ >= opt_.record_frames) quit_ = true;
+    }
     if (!opt_.screenshot.empty() && !screenshot_taken_ && now - started_ >= opt_.screenshot_seconds) {
         screenshot_taken_ = true;
         if (!renderer_.save_canvas(opt_.screenshot.c_str())) std::fprintf(stderr, "screenshot failed: %s\n", SDL_GetError());

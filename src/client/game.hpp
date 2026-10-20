@@ -23,6 +23,8 @@ struct GameOptions {
     std::string save_path;    // default: the per-user data folder SDL picks for the game
     std::string screenshot;   // save the canvas here after `screenshot_seconds` and quit
     double screenshot_seconds = 3;
+    std::string record_dir;   // save every frame here as BMP (for GIFs), starting after `screenshot_seconds`
+    int record_frames = 0;
 };
 
 class Game {
@@ -87,6 +89,7 @@ private:
     bool moved_ = false;
     bool quit_ = false;
     bool screenshot_taken_ = false;
+    int recorded_ = 0;
     bool debug_ = false;
     double fps_ = 60;
     uint32_t autoplay_tick_ = 0;

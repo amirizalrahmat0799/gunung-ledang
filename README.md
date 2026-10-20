@@ -7,7 +7,7 @@
 
 **A horror Metroidvania set on Malaysia's legendary mountain, written from scratch in C++20.**
 
-![Striking a penanggal in the forbidden forest](docs/images/combat.png)
+![Running, dashing and striking through the forbidden forest](docs/images/gameplay.gif)
 
 The Sultan of Melaka asked for the hand of the Puteri of Gunung Ledang. She asked for a bridge of gold, a bridge
 of silver, seven trays of mosquito hearts and a bowl of his son's blood. He refused the last, and she vanished
@@ -86,13 +86,14 @@ If SDL3 is already installed it is used; otherwise it is fetched.
 
 ### Development options
 
-| | |
+| Option | What it does |
 |---|---|
 | `--warp N` | Start at lantern N (0 summit, 1 plateau, 2 village, 3 forest) with every ability. Never touches your save |
 | `--start` | Skip the title screen |
 | `--debug` | Overlay with FPS, tick, position and velocity (also F1) |
 | `--save file` | Use a different save file |
 | `--autoplay --screenshot shot.bmp --seconds 3` | A scripted player; saves a frame and quits (used by CI) |
+| `--autoplay --record dir --frames 150` | Saves 150 frames at a steady 30 fps as BMPs, for making GIFs like the one above |
 
 ## How it's built
 
